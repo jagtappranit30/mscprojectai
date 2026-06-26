@@ -1014,7 +1014,7 @@ elif st.session_state.current_page == "Report View":
         <div style="margin-bottom: 2.5rem;">
             <h3 style="font-size: 1.25rem; color:#0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 0.25rem; margin-top: 0; margin-bottom: 0.75rem; text-transform: uppercase; font-family:sans-serif; font-size:0.9rem; letter-spacing:0.05em;">IV. Actionable Recommendations</h3>
             <ul style="padding-left: 1.5rem; margin: 0; line-height: 1.6; font-size: 0.95rem;">
-    """)
+    """, unsafe_allow_html=True)
     for rec in res.get("recommendations", []):
         st.markdown(f"""
                 <li style="margin-bottom: 0.5rem; text-align: justify; color:#1e293b;">{rec}</li>
