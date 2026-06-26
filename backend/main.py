@@ -9,11 +9,11 @@ from uuid import uuid4
 # Load environment
 load_dotenv()
 
-from models import AssessmentRequest, AssessmentResponse, AssessmentResult
-from services.extraction import get_extraction_service
-from services.scoring import ScoringService
-from services.rag import rag_service
-from utils.database import db_service
+from .models import AssessmentRequest, AssessmentResponse, AssessmentResult
+from .services.extraction import get_extraction_service
+from .services.scoring import ScoringService
+from .services.rag import rag_service
+from .utils.database import db_service
 
 # Initialize FastAPI
 app = FastAPI(
