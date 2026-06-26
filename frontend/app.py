@@ -167,7 +167,39 @@ st.markdown("""
         border-bottom: 1px solid #1e293b !important;
         color: #e2e8f0 !important;
     }
+
+    /* Isolated print/report table styles overriding global defaults */
+    .report-container {
+        background-color: #ffffff !important;
+        color: #1e293b !important;
+        padding: 3rem !important;
+        border-radius: 12px !important;
+        border: 1px solid #e2e8f0 !important;
+        font-family: 'Times New Roman', serif !important;
+        max-width: 800px !important;
+        margin: 0 auto !important;
+        box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1) !important;
+    }
+    .report-container table {
+        width: 100% !important;
+        border-collapse: collapse !important;
+        margin: 1rem 0 !important;
+    }
+    .report-container th {
+        background-color: #f1f5f9 !important;
+        color: #0f172a !important;
+        text-align: left !important;
+        padding: 0.75rem 1rem !important;
+        font-weight: 700 !important;
+        border-bottom: 2px solid #0f172a !important;
+    }
+    .report-container td {
+        padding: 0.75rem 1rem !important;
+        border-bottom: 1px solid #e2e8f0 !important;
+        color: #1e293b !important;
+    }
 </style>
+
 """, unsafe_allow_html=True)
 
 # ----------------- SESSION STATE & INITIAL MOCK DATA -----------------
@@ -900,7 +932,7 @@ elif st.session_state.current_page == "Report View":
     
     # Render Deloitte/Accenture style consulting report card
     st.markdown(f"""
-    <div style="background-color: #ffffff; color: #1e293b; padding: 3rem; border-radius: 12px; border: 1px solid #e2e8f0; font-family: 'Times New Roman', serif; max-width: 800px; margin: 0 auto; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
+    <div class="report-container">
         <!-- Report Header -->
         <div style="display:flex; justify-content:space-between; border-bottom: 2px solid #0f172a; padding-bottom: 1.5rem; margin-bottom: 2rem;">
             <div>
@@ -935,33 +967,33 @@ elif st.session_state.current_page == "Report View":
         <!-- Section 2: Outcomes Matrix -->
         <div style="margin-bottom: 2rem;">
             <h3 style="font-size: 1.25rem; color:#0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 0.25rem; margin-top: 0; margin-bottom: 0.75rem; text-transform: uppercase; font-family:sans-serif; font-size:0.9rem; letter-spacing:0.05em;">II. Productivity Pillars</h3>
-            <table style="width: 100%; border-collapse: collapse; margin-top: 0.5rem; color: #1e293b; font-family: sans-serif; font-size: 0.85rem;">
+            <table>
                 <thead>
-                    <tr style="border-bottom: 2px solid #0f172a;">
-                        <th style="padding: 6px; background:none; color:#0f172a !important; font-weight:700;">Evaluation Dimension</th>
-                        <th style="padding: 6px; background:none; color:#0f172a !important; font-weight:700;">Score</th>
-                        <th style="padding: 6px; background:none; color:#0f172a !important; font-weight:700;">Percentile Placement</th>
-                        <th style="padding: 6px; background:none; color:#0f172a !important; font-weight:700;">Classification</th>
+                    <tr>
+                        <th>Evaluation Dimension</th>
+                        <th>Score</th>
+                        <th>Percentile Placement</th>
+                        <th>Classification</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <tr style="border-bottom: 1px solid #e2e8f0;">
-                        <td style="padding: 8px 6px; color:#1e293b !important;">Labour Efficiency</td>
-                        <td style="padding: 8px 6px; color:#1e293b !important; font-weight:600;">{labour_score:.1f} / 50</td>
-                        <td style="padding: 8px 6px; color:#1e293b !important;">55th Percentile</td>
-                        <td style="padding: 8px 6px; color:#1e293b !important; color:#059669 !important; font-weight:600;">Above Median</td>
+                    <tr>
+                        <td>Labour Efficiency</td>
+                        <td style="font-weight:600;">{labour_score:.1f} / 50</td>
+                        <td>55th Percentile</td>
+                        <td style="color:#059669 !important; font-weight:600;">Above Median</td>
                     </tr>
-                    <tr style="border-bottom: 1px solid #e2e8f0;">
-                        <td style="padding: 8px 6px; color:#1e293b !important;">Financial Health</td>
-                        <td style="padding: 8px 6px; color:#1e293b !important; font-weight:600;">{financial_score:.1f} / 50</td>
-                        <td style="padding: 8px 6px; color:#1e293b !important;">72nd Percentile</td>
-                        <td style="padding: 8px 6px; color:#1e293b !important; color:#059669 !important; font-weight:600;">Strong</td>
+                    <tr>
+                        <td>Financial Health</td>
+                        <td style="font-weight:600;">{financial_score:.1f} / 50</td>
+                        <td>72nd Percentile</td>
+                        <td style="color:#059669 !important; font-weight:600;">Strong</td>
                     </tr>
-                    <tr style="border-bottom: 2px solid #0f172a; background: #f8fafc;">
-                        <td style="padding: 8px 6px; font-weight:700; color:#1e293b !important;">Composite Index</td>
-                        <td style="padding: 8px 6px; font-weight:700; color:#1e293b !important;">{prod_index:.1f} / 100</td>
-                        <td style="padding: 8px 6px; font-weight:700; color:#1e293b !important;">82nd Percentile</td>
-                        <td style="padding: 8px 6px; font-weight:700; color:#059669 !important;">High Performer</td>
+                    <tr style="background: #f8fafc;">
+                        <td style="font-weight:700;">Composite Index</td>
+                        <td style="font-weight:700;">{prod_index:.1f} / 100</td>
+                        <td style="font-weight:700;">82nd Percentile</td>
+                        <td style="font-weight:700; color:#059669 !important;">High Performer</td>
                     </tr>
                 </tbody>
             </table>
