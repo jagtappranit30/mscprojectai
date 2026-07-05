@@ -1,139 +1,451 @@
-import asyncio
+"""
+Metric extraction service for the SME Productivity Assessment Platform.
+
+Design principles (MSc spec):
+- Per-metric extraction: one RAG query + one Groq call per required metric.
+- Prompt injection sanitisation before document text enters any LLM call.
+- Explicit prompt delimiters (<DOCUMENT>...</DOCUMENT>) separate content from instructions.
+- Strict Pydantic v2 validation of every LLM JSON response.
+  On validation failure: return a structured ExtractionError. No retry, no fallback guess.
+- Conflict detection: if two source passages return values differing by >10%,
+  a ConflictWarning is produced — the caller is never silently given one value.
+- No LLM arithmetic. The LLM extracts named values only.
+  All ratio computation happens in scoring.py.
+"""
+
+from __future__ import annotations
+
 import json
 import re
-from typing import Dict, Any
-from ..models import ExtractedMetrics
+from typing import Dict, List, Optional, Tuple
+
+from ..models import (
+    ConflictWarning,
+    ExtractedMetrics,
+    ExtractionError,
+    ExtractionResult,
+    LLMMetricResponse,
+)
 from ..utils.config import settings
+from ..utils.database import db_service
 
-class ExtractionService:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.enabled = api_key != "placeholder" and api_key != ""
-        if self.enabled:
-            try:
-                from groq import Groq
-                self.client = Groq(api_key=api_key)
-            except Exception as e:
-                print(f"Failed to initialize Groq client: {e}")
-                self.enabled = False
-    
-    async def extract_metrics_from_text(self, text: str) -> ExtractedMetrics:
-        """
-        Use Groq Llama 3.3 to extract structured financial metrics from document text.
-        Returns deterministic (temperature=0.3) structured JSON, with fallback mock parsing.
-        """
-        if not self.enabled:
-            print("Groq API not configured or enabled. Using mock metric extraction.")
-            return self._generate_mock_metrics(text)
-            
-        prompt = f"""You are a financial data extraction specialist. Your task is to extract 
-financial metrics from the following document text.
+# ──────────────────────────────────────────────────────────────
+# Metrics the pipeline must attempt to extract
+# Each entry: (metric_name, retrieval_query, unit_hint)
+# ──────────────────────────────────────────────────────────────
+EXTRACTION_QUERIES: List[Tuple[str, str, str]] = [
+    (
+        "revenue",
+        "total revenue turnover annual sales income",
+        "£ (British pounds)",
+    ),
+    (
+        "headcount",
+        "number of employees headcount staff workforce full-time",
+        "integer count of employees",
+    ),
+    (
+        "payroll",
+        "total payroll wages salaries staff costs employee costs",
+        "£ (British pounds)",
+    ),
+    (
+        "gross_margin",
+        "gross margin gross profit percentage cost of goods sold COGS",
+        "percentage 0–100",
+    ),
+    (
+        "operating_margin",
+        "operating margin EBIT operating profit percentage",
+        "percentage 0–100",
+    ),
+    (
+        "current_assets",
+        "current assets cash receivables short-term assets balance sheet",
+        "£ (British pounds)",
+    ),
+    (
+        "current_liabilities",
+        "current liabilities short-term debt payables balance sheet",
+        "£ (British pounds)",
+    ),
+    (
+        "inventory",
+        "inventory stock finished goods raw materials balance sheet",
+        "£ (British pounds)",
+    ),
+    # Digital maturity indicators (extracted as lists, not numbers)
+    (
+        "digital_tools",
+        "software tools ERP CRM accounting system digital platform used",
+        "comma-separated list of software tool names",
+    ),
+    (
+        "automation",
+        "automation digital transformation workflow RPA robotic process paperless e-invoicing",
+        "boolean — yes/no whether automation is described",
+    ),
+]
 
-RETURN ONLY VALID JSON (no markdown, no explanation). Use null for missing values.
+# ──────────────────────────────────────────────────────────────
+# Injection sanitiser
+# ──────────────────────────────────────────────────────────────
 
-Required JSON structure:
+# Patterns that look like attempts to override the LLM system prompt
+_INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(previous|all|above)\s+instructions?", re.IGNORECASE),
+    re.compile(r"forget\s+(everything|above|previous|all)", re.IGNORECASE),
+    re.compile(r"\bsystem\s*:\s*", re.IGNORECASE),
+    re.compile(r"\bassistant\s*:\s*", re.IGNORECASE),
+    re.compile(r"<\s*/?(?:system|im_start|im_end|s|\/s)\s*>", re.IGNORECASE),
+    re.compile(r"\[INST\]|\[\/INST\]|\[SYS\]|\[\/SYS\]", re.IGNORECASE),
+    re.compile(r"<<SYS>>|<</SYS>>", re.IGNORECASE),
+    re.compile(r"you are now|pretend to be|act as|roleplay as", re.IGNORECASE),
+    re.compile(r"disregard\s+(the\s+)?previous", re.IGNORECASE),
+]
+
+
+def sanitise_content(text: str) -> str:
+    """
+    Strip prompt-injection patterns from document text before it enters an LLM prompt.
+    Replaces detected patterns with '[REDACTED]' so the passage length is preserved
+    for traceability but the instruction cannot be interpreted by the model.
+    """
+    for pattern in _INJECTION_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
+
+
+# ──────────────────────────────────────────────────────────────
+# Worked example (one per metric type to anchor the response format)
+# ──────────────────────────────────────────────────────────────
+
+_WORKED_EXAMPLE = """\
+EXAMPLE (for revenue metric):
+Input passage: "The company generated total revenues of £1,250,000 in the year ending March 2024."
+Expected JSON output:
+{
+  "metric_name": "revenue",
+  "value": 1250000.0,
+  "unit": "£",
+  "confidence": 0.95,
+  "source_quote": "total revenues of £1,250,000 in the year ending March 2024"
+}
+If the metric is not present in the passage, set "value" to null and "confidence" to 0.0.
+"""
+
+
+def _build_extraction_prompt(
+    metric_name: str,
+    unit_hint: str,
+    context_passages: List[str],
+) -> str:
+    """
+    Build a delimited extraction prompt for one metric.
+    Document content is wrapped in <DOCUMENT>...</DOCUMENT> tags to prevent
+    injected text from being interpreted as instructions.
+    """
+    sanitised_passages = [sanitise_content(p) for p in context_passages]
+    joined_context = "\n---\n".join(sanitised_passages)
+
+    return f"""You are a financial data extraction assistant. Your only task is to extract the value of the metric named below from the provided document passages.
+
+{_WORKED_EXAMPLE}
+
+METRIC TO EXTRACT: {metric_name}
+EXPECTED UNIT: {unit_hint}
+
+Return ONLY a single valid JSON object. No markdown fences, no explanation, no additional text.
+The JSON must conform exactly to this schema:
 {{
-  "revenue": <number in £>,
-  "headcount": <integer>,
-  "cogs": <number in £ or null>,
-  "payroll": <number in £ or null>,
-  "gross_margin": <percentage 0-100 or null>,
-  "operating_margin": <percentage 0-100 or null>,
-  "current_assets": <number in £ or null>,
-  "current_liabilities": <number in £ or null>,
-  "inventory": <number in £ or null>,
-  "confidence": <0-100 confidence score>
+  "metric_name": "<string>",
+  "value": <number or null>,
+  "unit": "<string>",
+  "confidence": <float 0.0–1.0>,
+  "source_quote": "<exact verbatim quote from the passages below, or empty string>"
 }}
 
-Document text:
-{text}"""
-        
+<DOCUMENT>
+{joined_context}
+</DOCUMENT>
+
+JSON output:"""
+
+
+class ExtractionService:
+    """
+    Per-metric RAG-backed extraction service using Groq Llama 3.3 70B.
+    """
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.enabled = bool(api_key) and api_key not in ("placeholder", "")
+        self.client = None
+        if self.enabled:
+            try:
+                from groq import Groq  # type: ignore
+                self.client = Groq(api_key=api_key)
+                print("Groq extraction service initialised.")
+            except Exception as exc:
+                print(f"Failed to initialise Groq client: {exc}")
+                self.enabled = False
+
+    # ──────────────────────────────────────────────────────────
+    def _call_groq(self, prompt: str) -> str:
+        """Synchronous Groq API call. Returns raw response text."""
+        response = self.client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,   # deterministic extraction
+            max_tokens=300,
+        )
+        return response.choices[0].message.content.strip()
+
+    # ──────────────────────────────────────────────────────────
+    def _parse_llm_response(
+        self,
+        metric_name: str,
+        raw_text: str,
+        source_passages: List[str],
+    ) -> Tuple[Optional[ExtractionResult], Optional[ExtractionError]]:
+        """
+        Parse and strictly validate the LLM JSON response.
+        Returns (ExtractionResult, None) on success.
+        Returns (None, ExtractionError) on any validation failure — no retry.
+        """
+        # Strip accidental markdown fences
+        clean = raw_text
+        if clean.startswith("```"):
+            parts = clean.split("```")
+            clean = parts[1].strip()
+            if clean.startswith("json"):
+                clean = clean[4:].strip()
+
+        # Extract the first JSON object if surrounded by noise
+        match = re.search(r"\{.*\}", clean, re.DOTALL)
+        if match:
+            clean = match.group(0)
+
         try:
-            # Groq completion is synchronous in the std lib; run in threadpool if needed or call directly
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=500
+            data = json.loads(clean)
+        except json.JSONDecodeError as exc:
+            return None, ExtractionError(
+                metric_name=metric_name,
+                raw_response=raw_text[:500],
+                error_detail=f"JSON parse error: {exc}",
             )
-            
-            # Parse JSON response
-            response_text = response.choices[0].message.content.strip()
-            
-            # Remove markdown code block if present
-            if response_text.startswith("```"):
-                response_text = response_text.split("```")[1].strip()
-                if response_text.startswith("json"):
-                    response_text = response_text[4:].strip()
-            
-            # Extract just the JSON object using regex if there's text around it
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                response_text = json_match.group(0)
-                
-            metrics_dict = json.loads(response_text)
-            return ExtractedMetrics(**metrics_dict)
-        
-        except Exception as e:
-            print(f"Error extracting metrics via Groq: {e}. Falling back to rule-based mock parser.")
-            return self._generate_mock_metrics(text)
 
-    def _generate_mock_metrics(self, text: str) -> ExtractedMetrics:
-        """Rule-based metric parser for mock extraction or fallback"""
-        text_lower = text.lower()
-        
-        # Simple regex heuristics to look for numbers in typical formats
-        def find_number(patterns):
-            for pattern in patterns:
-                matches = re.findall(pattern, text_lower)
-                if matches:
-                    try:
-                        # Extract digit characters, dot, or commas
-                        num_str = re.sub(r'[^\d.]', '', matches[0])
-                        return float(num_str)
-                    except ValueError:
+        try:
+            validated: LLMMetricResponse = LLMMetricResponse.model_validate(data)
+        except Exception as exc:
+            return None, ExtractionError(
+                metric_name=metric_name,
+                raw_response=raw_text[:500],
+                error_detail=f"Schema validation error: {exc}",
+            )
+
+        # Use the source_quote from the LLM if available, else use the first passage
+        source_passage = validated.source_quote or (source_passages[0] if source_passages else "")
+
+        result = ExtractionResult(
+            metric_name=metric_name,
+            value=validated.value,
+            unit=validated.unit,
+            confidence=validated.confidence,
+            source_passage=source_passage,
+        )
+        return result, None
+
+    # ──────────────────────────────────────────────────────────
+    async def extract_all_metrics(
+        self,
+        run_id: str,
+        rag_service,
+    ) -> Tuple[ExtractedMetrics, List[ConflictWarning], List[ExtractionError], Dict[str, str]]:
+        """
+        Run per-metric RAG retrieval + Groq extraction for all required metrics.
+
+        Returns
+        -------
+        metrics:          Flat ExtractedMetrics object for the scoring engine.
+        conflict_warnings: List of ConflictWarnings where >10% discrepancy was detected.
+        extraction_errors: List of structured errors for metrics that failed validation.
+        source_passages:  Dict[metric_name → source passage text] for traceability.
+        """
+        extraction_results: Dict[str, ExtractionResult] = {}
+        conflict_warnings: List[ConflictWarning] = []
+        extraction_errors: List[ExtractionError] = []
+        source_passages: Dict[str, str] = {}
+
+        for metric_name, query, unit_hint in EXTRACTION_QUERIES:
+            # Skip digital indicator metrics — handled separately below
+            if metric_name in ("digital_tools", "automation"):
+                continue
+
+            # Step 1: RAG retrieval — top-5 relevant chunks
+            try:
+                retrieved = await rag_service.retrieve_context(
+                    query=query, run_id=run_id, top_k=5
+                )
+            except Exception as exc:
+                print(f"RAG retrieval failed for {metric_name}: {exc}")
+                retrieved = []
+
+            if not retrieved:
+                extraction_results[metric_name] = ExtractionResult(
+                    metric_name=metric_name,
+                    value=None,
+                    confidence=0.0,
+                    source_passage="",
+                )
+                continue
+
+            if not self.enabled:
+                # No Groq — record as not found
+                extraction_results[metric_name] = ExtractionResult(
+                    metric_name=metric_name,
+                    value=None,
+                    confidence=0.0,
+                    source_passage="",
+                )
+                continue
+
+            # Step 2: Build delimited prompt (with injection sanitisation)
+            prompt = _build_extraction_prompt(metric_name, unit_hint, retrieved)
+
+            # Step 3: Call Groq
+            try:
+                raw_response = self._call_groq(prompt)
+            except Exception as exc:
+                extraction_errors.append(ExtractionError(
+                    metric_name=metric_name,
+                    raw_response="",
+                    error_detail=f"Groq API error: {exc}",
+                ))
+                continue
+
+            # Step 4: Parse + validate (strict — no fallback)
+            result, error = self._parse_llm_response(metric_name, raw_response, retrieved)
+            if error:
+                extraction_errors.append(error)
+                continue
+
+            # Step 5: Conflict detection — compare against any previously extracted value
+            if metric_name in extraction_results:
+                existing = extraction_results[metric_name]
+                if (
+                    existing.value is not None
+                    and result.value is not None
+                    and existing.value != 0
+                ):
+                    discrepancy = abs(result.value - existing.value) / abs(existing.value) * 100
+                    if discrepancy > 10.0:
+                        conflict_warnings.append(ConflictWarning(
+                            metric_name=metric_name,
+                            value_a=existing.value,
+                            value_b=result.value,
+                            passage_a=existing.source_passage,
+                            passage_b=result.source_passage,
+                            discrepancy_pct=discrepancy,
+                        ))
+                        # Do NOT silently pick one — keep the first (higher confidence)
+                        # and leave the conflict visible to the user
                         continue
-            return None
 
-        # Look for revenue/turnover
-        revenue = find_number([
-            r'(?:revenue|turnover)\s*(?:is|of|amounted to)?\s*(?:£|\$|usd|gbp)?\s*([\d,]+(?:\.\d+)?)',
-            r'(?:total sales)\s*(?:is|of)?\s*(?:£|\$|usd|gbp)?\s*([\d,]+(?:\.\d+)?)'
-        ])
-        
-        # Look for headcount/employees
-        headcount = find_number([
-            r'(?:headcount|employees|staff|number of staff)\s*(?:is|of|was)?\s*([\d,]+)',
-            r'([\d,]+)\s*(?:employees|staff members|workers)'
-        ])
-        
-        # Look for payroll/salaries
-        payroll = find_number([
-            r'(?:payroll|wages|salaries|staff costs)\s*(?:is|of)?\s*(?:£|\$|usd|gbp)?\s*([\d,]+(?:\.\d+)?)'
-        ])
-        
-        # Default mock fallback if nothing matched
-        if not revenue:
-            revenue = 180000.0
-        if not headcount:
-            headcount = 10
-        if not payroll:
-            payroll = 45000.0
-            
-        return ExtractedMetrics(
-            revenue=revenue,
-            headcount=int(headcount),
-            payroll=payroll,
-            cogs=revenue * 0.4 if revenue else None,
-            gross_margin=60.0,
-            operating_margin=15.0,
-            current_assets=75000.0,
-            current_liabilities=50000.0,
-            inventory=15000.0,
-            confidence=85.0
+            extraction_results[metric_name] = result
+            if result.source_passage:
+                source_passages[metric_name] = result.source_passage
+
+        # ── Digital maturity extraction ───────────────────────
+        digital_tools, automation_detected, process_indicators = (
+            await self._extract_digital_indicators(run_id, rag_service)
         )
 
-# Initialize
-def get_extraction_service():
-    api_key = settings.GROQ_API_KEY
-    return ExtractionService(api_key)
+        # ── Assemble ExtractedMetrics ─────────────────────────
+        def _val(name: str) -> Optional[float]:
+            r = extraction_results.get(name)
+            return r.value if r else None
+
+        def _int_val(name: str) -> Optional[int]:
+            v = _val(name)
+            return int(round(v)) if v is not None else None
+
+        # Overall confidence = mean of per-metric confidences for found metrics
+        found_confidences = [
+            r.confidence for r in extraction_results.values()
+            if r.value is not None
+        ]
+        overall_confidence = (
+            sum(found_confidences) / len(found_confidences)
+            if found_confidences else 0.0
+        )
+
+        metrics = ExtractedMetrics(
+            revenue=_val("revenue"),
+            headcount=_int_val("headcount"),
+            payroll=_val("payroll"),
+            gross_margin=_val("gross_margin"),
+            operating_margin=_val("operating_margin"),
+            current_assets=_val("current_assets"),
+            current_liabilities=_val("current_liabilities"),
+            inventory=_val("inventory"),
+            digital_tools_mentioned=digital_tools,
+            automation_mentioned=automation_detected,
+            digital_process_indicators=process_indicators,
+            confidence=overall_confidence,
+        )
+
+        return metrics, conflict_warnings, extraction_errors, source_passages
+
+    # ──────────────────────────────────────────────────────────
+    async def _extract_digital_indicators(
+        self,
+        run_id: str,
+        rag_service,
+    ) -> Tuple[List[str], bool, List[str]]:
+        """
+        Extract digital maturity indicators from retrieved chunks.
+        Uses keyword matching on retrieved text — no LLM arithmetic.
+        """
+        from .scoring import AUTOMATION_KEYWORDS, KNOWN_DIGITAL_TOOLS
+
+        try:
+            chunks = await rag_service.retrieve_context(
+                query="software tools automation digital transformation ERP CRM",
+                run_id=run_id,
+                top_k=8,
+            )
+        except Exception:
+            return [], False, []
+
+        combined_text = " ".join(chunks).lower()
+        sanitised = sanitise_content(combined_text)
+
+        # Tool detection
+        found_tools = [
+            tool.title() for tool in KNOWN_DIGITAL_TOOLS
+            if tool.lower() in sanitised
+        ]
+
+        # Automation language detection
+        automation_detected = any(kw in sanitised for kw in AUTOMATION_KEYWORDS)
+
+        # Digital process indicator phrases
+        indicator_patterns = [
+            "electronic invoic", "e-invoic", "cloud-based", "online platform",
+            "digital workflow", "automated report", "api integrat",
+            "paperless", "mobile app", "real-time dashboard", "data analytics",
+        ]
+        process_indicators = [
+            phrase for phrase in indicator_patterns if phrase in sanitised
+        ]
+
+        return found_tools, automation_detected, process_indicators
+
+
+# ──────────────────────────────────────────────────────────────
+# Module-level factory
+# ──────────────────────────────────────────────────────────────
+
+def get_extraction_service() -> ExtractionService:
+    return ExtractionService(api_key=settings.GROQ_API_KEY)

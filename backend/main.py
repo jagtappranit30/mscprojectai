@@ -1,231 +1,332 @@
+"""
+FastAPI application — SME Productivity Assessment Platform.
+
+POST /assess:
+  Accepts multiple PDF/CSV file uploads + form fields (company_name, sector).
+  Pipeline stages (reported in response):
+    1. parsing   — extract text from each uploaded file
+    2. chunking  — split into 500-word / 50-word overlap chunks
+    3. embedding — FastEmbed bge-small-en-v1.5 ONNX embeddings → Supabase pgvector
+    4. retrieving — per-metric RAG retrieval (top-5 chunks per metric query)
+    5. extracting — Groq Llama 3.3 70B per-metric extraction + Pydantic validation
+    6. scoring    — deterministic min-max scoring (NumPy, no model inference)
+
+Hard constraints respected:
+  - No LLM arithmetic. LLM extracts named values; scoring.py does all maths.
+  - Strict Pydantic v2 validation; extraction errors returned as structured data.
+  - Conflict warnings (>10% discrepancy) surfaced in response, never silently resolved.
+  - Exclusion (not imputation) for missing metrics, with per-pillar confidence.
+"""
+
+from __future__ import annotations
+
 import os
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import List
 from uuid import uuid4
 
-# Load environment
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from dotenv import load_dotenv
+
 load_dotenv()
 
-from .models import AssessmentRequest, AssessmentResponse, AssessmentResult
+# Auth dependencies (preserved from existing prototype — out of spec scope)
+import jwt
+from passlib.context import CryptContext
+
+from .models import (
+    AssessmentOutput,
+    AssessmentResponse,
+    UserLogin,
+    UserSignup,
+)
 from .services.extraction import get_extraction_service
-from .services.scoring import ScoringService
+from .services.pdf_generator import generate_assessment_report
 from .services.rag import rag_service
+from .services.scoring import ScoringService
+from .utils.config import settings
 from .utils.database import db_service
 
-# Initialize FastAPI
+# ── Auth configuration (out of spec scope — preserved) ────────
+SECRET_KEY = os.getenv("SUPABASE_JWT_SECRET", "supersecretkey")
+ALGORITHM = "HS256"
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# ── App ────────────────────────────────────────────────────────
 app = FastAPI(
     title="SME Productivity Assessment API",
-    description="AI-powered productivity assessment for SMEs",
-    version="1.0.0"
+    description=(
+        "AI-powered productivity assessment for SMEs. "
+        "RAG pipeline: FastEmbed (ONNX) → Supabase pgvector → Groq Llama 3.3 70B → "
+        "Deterministic NumPy scoring."
+    ),
+    version="2.0.0",
 )
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all for development and flexible container setup
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Document processing
-async def extract_text_from_pdf(file: UploadFile) -> str:
-    """Extract text from PDF using PyMuPDF (fitz)"""
+
+# ── Document parsing helpers ───────────────────────────────────
+
+async def _parse_pdf(file: UploadFile) -> str:
+    """Extract plain text from a PDF using PyMuPDF."""
     import fitz  # PyMuPDF
-    
+
     content = await file.read()
-    pdf_doc = fitz.open(stream=content, filetype="pdf")
-    
-    text = ""
-    for page_num in range(len(pdf_doc)):
-        page = pdf_doc[page_num]
-        text += page.get_text()
-        
-    # Reset read pointer
+    doc = fitz.open(stream=content, filetype="pdf")
+    text = "".join(page.get_text() for page in doc)
     await file.seek(0)
     return text
 
-async def extract_text_from_csv(file: UploadFile) -> str:
-    """Extract text from CSV"""
+
+async def _parse_csv(file: UploadFile) -> str:
+    """Convert CSV rows to plain text (one row per line, comma-joined)."""
     import csv
     import io
-    
+
     content = await file.read()
-    text_file = io.StringIO(content.decode("utf-8", errors="ignore"))
-    reader = csv.reader(text_file)
-    
-    text = ""
-    for row in reader:
-        text += ", ".join(row) + "\n"
-        
-    # Reset read pointer
+    reader = csv.reader(io.StringIO(content.decode("utf-8", errors="ignore")))
+    text = "\n".join(", ".join(row) for row in reader)
     await file.seek(0)
     return text
 
-@app.post("/assess")
+
+async def _extract_text(file: UploadFile) -> str:
+    """Dispatch to the correct parser based on file extension."""
+    name = (file.filename or "").lower()
+    if name.endswith(".pdf"):
+        return await _parse_pdf(file)
+    if name.endswith(".csv"):
+        return await _parse_csv(file)
+    raise ValueError(f"Unsupported file type: {file.filename}")
+
+
+# ── Main assessment endpoint ───────────────────────────────────
+
+@app.post("/assess", response_model=AssessmentResponse)
 async def assess_productivity(
-    file: UploadFile = File(...),
-    company_name: str = Form("Unknown"),
+    files: List[UploadFile] = File(...),
+    company_name: str = Form(default="Unknown"),
     sector: str = Form(...),
-    document_type: str = Form(...)
 ) -> JSONResponse:
     """
-    Main assessment endpoint.
-    
-    1. Extract text from uploaded file
-    2. Run RAG service chunking & embedding storage
-    3. Use Groq LLM to extract structured metrics
-    4. Calculate productivity scores
-    5. Store results in database
-    6. Return assessment results
+    POST /assess — run the full productivity assessment pipeline.
+
+    Form fields:
+      - files:        one or more PDF/CSV uploads
+      - company_name: optional company name string
+      - sector:       required — "Retail" | "Services" | "Manufacturing"
     """
-    
-    run_id = None
-    
+    run_id: str | None = None
+    pipeline_stages: dict = {}
+
     try:
-        # Step 1: Create ingestion run
+        # ── Create ingestion run ───────────────────────────────
         run_id = await db_service.create_ingestion_run(
             sector=sector,
             company_name=company_name,
-            document_type=document_type
+            document_type="MIXED" if len(files) > 1 else (
+                "PDF" if (files[0].filename or "").endswith(".pdf") else "CSV"
+            ),
         )
-        
-        # Step 2: Extract text from document
-        if document_type.upper() == "PDF" or file.filename.endswith(".pdf"):
-            raw_text = await extract_text_from_pdf(file)
-        else:
-            raw_text = await extract_text_from_csv(file)
-        
-        if not raw_text or len(raw_text.strip()) < 20:
-            await db_service.update_run_status(run_id, "failed", error_message="Document appears empty or unreadable")
+
+        # ── Stage 1: Parsing ───────────────────────────────────
+        pipeline_stages["parsing"] = "running"
+        all_text_parts: List[str] = []
+        for f in files:
+            try:
+                text = await _extract_text(f)
+                if text and len(text.strip()) >= 20:
+                    all_text_parts.append(text)
+            except ValueError as exc:
+                await db_service.update_run_status(run_id, "failed", error_message=str(exc))
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "error", "message": str(exc)},
+                )
+
+        if not all_text_parts:
+            await db_service.update_run_status(
+                run_id, "failed",
+                error_message="All uploaded documents appear empty or unreadable",
+            )
             return JSONResponse(
                 status_code=400,
-                content={
-                    "status": "error",
-                    "message": "Document appears empty or unreadable"
-                }
+                content={"status": "error", "message": "Documents appear empty or unreadable"},
             )
-        
-        # Step 3: Run RAG indexing (Chunking and embedding storage)
+
+        raw_text = "\n\n".join(all_text_parts)
+        pipeline_stages["parsing"] = "complete"
+
+        # ── Stage 2 + 3: Chunking & Embedding ─────────────────
+        pipeline_stages["embedding"] = "running"
         chunks = await rag_service.chunk_text(raw_text)
         embeddings = await rag_service.embed_chunks(chunks)
-        await rag_service.store_embeddings(run_id, chunks, embeddings)
-        
-        # Step 4: Extract metrics using Groq LLM (or fallback parser)
+
+        # Store with source filename (first file if multiple)
+        source_filename = files[0].filename if files else ""
+        await rag_service.store_embeddings(run_id, chunks, embeddings, source_filename)
+        pipeline_stages["embedding"] = "complete"
+
+        # ── Stage 4 + 5: Per-metric RAG retrieval + Extraction ─
+        pipeline_stages["retrieving"] = "running"
+        pipeline_stages["extracting"] = "running"
         extraction_service = get_extraction_service()
-        metrics = await extraction_service.extract_metrics_from_text(raw_text)
-        
-        # Step 5: Store extracted metrics
+        metrics, conflict_warnings, extraction_errors, source_passages = (
+            await extraction_service.extract_all_metrics(run_id, rag_service)
+        )
+        pipeline_stages["retrieving"] = "complete"
+        pipeline_stages["extracting"] = "complete"
+
+        # Store extracted metrics in DB
         metrics_dict = {
-            "revenue": {"value": metrics.revenue, "unit": "£", "confidence": metrics.confidence},
-            "headcount": {"value": metrics.headcount, "unit": "count", "confidence": metrics.confidence},
-            "payroll": {"value": metrics.payroll, "unit": "£", "confidence": metrics.confidence},
-            "gross_margin": {"value": metrics.gross_margin, "unit": "%", "confidence": metrics.confidence},
-            "operating_margin": {"value": metrics.operating_margin, "unit": "%", "confidence": metrics.confidence},
+            name: {"value": getattr(metrics, name, None), "unit": "£", "confidence": metrics.confidence}
+            for name in ["revenue", "headcount", "payroll", "gross_margin",
+                         "operating_margin", "current_assets", "current_liabilities", "inventory"]
+            if getattr(metrics, name, None) is not None
         }
         await db_service.store_extracted_metrics(run_id, metrics_dict)
-        
-        # Step 6: Calculate productivity scores
-        labour_score, financial_score, prod_index, digital_score = \
+
+        # ── Stage 6: Scoring ───────────────────────────────────
+        pipeline_stages["scoring"] = "running"
+        labour_pillar, financial_pillar, composite_index, digital_maturity = (
             await ScoringService.calculate_productivity_index(
-                metrics.model_dump(),
-                sector
+                metrics, sector, source_passages
             )
-        
-        # Step 7: Generate recommendations
-        recommendations = ScoringService.generate_recommendations(
-            labour_score, financial_score, prod_index, sector
         )
-        
-        # Look for sector benchmarks for the final response
-        rev_emp_bench = await db_service.get_benchmark(sector, "revenue_per_employee")
-        gross_marg_bench = await db_service.get_benchmark(sector, "gross_margin")
-        op_marg_bench = await db_service.get_benchmark(sector, "operating_margin")
-        payroll_bench = await db_service.get_benchmark(sector, "output_per_payroll")
-        
-        # Prepare digital tools diagnosis
-        digital_tools = []
-        lower_text = raw_text.lower()
-        tools_list = ["xero", "quickbooks", "sage", "sap", "excel", "salesforce", "hubspot", "monday.com", "slack", "trello", "jira"]
-        for tool in tools_list:
-            if tool in lower_text:
-                digital_tools.append(tool.capitalize())
-        digital_tools_str = ", ".join(digital_tools) if digital_tools else "None specifically identified"
-        
-        # Step 8: Store assessment result
+
+        recommendations = ScoringService.generate_recommendations(
+            labour_pillar, financial_pillar, composite_index, sector, source_passages
+        )
+        pipeline_stages["scoring"] = "complete"
+
+        # ── Store result ───────────────────────────────────────
         result_id = str(uuid4())
         await db_service.store_assessment_result({
             "result_id": result_id,
-            "run_id": str(run_id),
-            "labour_efficiency_score": labour_score,
-            "financial_health_score": financial_score,
-            "productivity_index": prod_index,
-            "digital_maturity_score": digital_score,
-            "confidence_overall": metrics.confidence,
-            "recommendations": "\n".join(recommendations)
+            "run_id": run_id,
+            "labour_efficiency_score": labour_pillar.score,
+            "financial_health_score": financial_pillar.score,
+            "productivity_index": composite_index,
+            "digital_maturity_score": digital_maturity.score,
+            "confidence_overall": metrics.confidence * 100,
+            "recommendations": "; ".join(r.text for r in recommendations),
         })
-        
-        # Step 9: Update run status
-        await db_service.update_run_status(
-            run_id, "complete", metrics.confidence
+        await db_service.update_run_status(run_id, "complete", metrics.confidence * 100)
+
+        # ── Build response ─────────────────────────────────────
+        output = AssessmentOutput(
+            result_id=result_id,
+            run_id=run_id,
+            company_name=company_name,
+            sector=sector,
+            created_at=datetime.now(timezone.utc),
+            productivity_index=composite_index,
+            labour_efficiency=labour_pillar,
+            financial_health=financial_pillar,
+            digital_maturity=digital_maturity,
+            conflict_warnings=conflict_warnings,
+            extraction_errors=extraction_errors,
+            recommendations=recommendations,
+            pipeline_stages=pipeline_stages,
         )
-        
-        # Prepare response result payload
-        result_payload = {
-            "result_id": result_id,
-            "run_id": str(run_id),
-            "company_name": company_name,
-            "sector": sector,
-            "labour_efficiency_score": float(labour_score),
-            "financial_health_score": float(financial_score),
-            "productivity_index": float(prod_index),
-            "digital_maturity_score": float(digital_score),
-            "confidence_overall": float(metrics.confidence),
-            "revenue_per_employee": float(metrics.revenue / metrics.headcount if metrics.headcount else 0.0),
-            "output_per_payroll": float(metrics.revenue / metrics.payroll if metrics.payroll else 0.0),
-            "gross_margin": float(metrics.gross_margin) if metrics.gross_margin is not None else 0.0,
-            "operating_margin": float(metrics.operating_margin) if metrics.operating_margin is not None else 0.0,
-            "current_ratio": float(metrics.current_assets / metrics.current_liabilities if metrics.current_liabilities else 1.5),
-            "sector_benchmark_revenue_per_emp": float(rev_emp_bench.get("p50", 150000)),
-            "sector_benchmark_output_per_payroll": float(payroll_bench.get("p50", 3.8)),
-            "sector_benchmark_gross_margin": float(gross_marg_bench.get("p50", 35.0)),
-            "sector_benchmark_operating_margin": float(op_marg_bench.get("p50", 12.0)),
-            "recommendations": recommendations,
-            "digital_maturity_level": "Medium" if len(digital_tools) >= 2 else "Low",
-            "digital_tools_identified": digital_tools_str,
-            "created_at": str(uuid4()) # Placeholder for timestamp mapping or datetime serialization
-        }
-        
+
         return JSONResponse(
             status_code=200,
             content={
                 "status": "success",
                 "message": "Assessment completed successfully",
-                "result": result_payload
-            }
+                "result": output.model_dump(mode="json"),
+            },
         )
-        
-    except Exception as e:
+
+    except Exception as exc:
         import traceback
         traceback.print_exc()
         if run_id:
-            await db_service.update_run_status(run_id, "failed", error_message=str(e))
-        
+            await db_service.update_run_status(run_id, "failed", error_message=str(exc))
         return JSONResponse(
             status_code=500,
-            content={
-                "status": "error",
-                "message": f"Assessment failed: {str(e)}"
-            }
+            content={"status": "error", "message": f"Assessment failed: {exc}"},
         )
+
+
+# ── Health check ───────────────────────────────────────────────
 
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
 
+
+# ── Auth endpoints (out of spec scope — preserved) ────────────
+
+@app.post("/signup")
+async def signup(user: UserSignup):
+    if user.password != user.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    if len(user.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    hashed = pwd_context.hash(user.password)
+    try:
+        user_id = await db_service.create_user(user.email, hashed, user.company_name)
+        return {"status": "success", "message": "User created", "user_id": user_id}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/login")
+async def login(user: UserLogin):
+    user_data = await db_service.get_user_by_email(user.email)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not pwd_context.verify(user.password, user_data["hashed_password"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    expire = datetime.now(timezone.utc) + timedelta(days=7)
+    token = jwt.encode(
+        {"sub": str(user_data["user_id"]), "email": user.email, "exp": expire},
+        SECRET_KEY,
+        algorithm=ALGORITHM,
+    )
+    return {"status": "success", "token": token, "user_id": user_data["user_id"]}
+
+
+@app.post("/assessments/{result_id}/save")
+async def save_assessment(result_id: str, user_id: str = Form(...)):
+    await db_service.save_assessment_to_user(result_id, user_id)
+    return {"status": "success", "message": "Assessment saved"}
+
+
+@app.get("/reports/{run_id}/pdf")
+async def get_pdf_report(run_id: str):
+    if db_service.enabled:
+        res = db_service.client.table("assessment_results").select("*").eq("run_id", run_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Report not found")
+        result_data = res.data[0]
+        ing = db_service.client.table("ingestion_runs").select("*").eq("id", run_id).execute()
+        if ing.data:
+            result_data["company_name"] = ing.data[0].get("company_name")
+            result_data["sector"] = ing.data[0].get("sector")
+    else:
+        result_data = next(
+            (r for r in db_service.mock_results.values() if r.get("run_id") == run_id),
+            None,
+        )
+        if not result_data:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+    file_path = generate_assessment_report(result_data)
+    return FileResponse(file_path, filename=f"Assessment_{run_id}.pdf", media_type="application/pdf")
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

@@ -151,5 +151,40 @@ class DatabaseService:
         self.mock_results[res_id] = result_data
         return res_id
 
+    # User Management
+    async def create_user(self, email: str, hashed_password: str, company_name: str) -> str:
+        """Create a new user"""
+        if self.enabled:
+            try:
+                response = self.client.table("users").insert({
+                    "email": email,
+                    "hashed_password": hashed_password,
+                    "company_name": company_name
+                }).execute()
+                return response.data[0]["user_id"]
+            except Exception as e:
+                print(f"Supabase create_user error: {e}")
+                raise e
+        return "mock-user-id"
+
+    async def get_user_by_email(self, email: str) -> Optional[Dict]:
+        """Get user by email"""
+        if self.enabled:
+            try:
+                response = self.client.table("users").select("*").eq("email", email).execute()
+                if response.data:
+                    return response.data[0]
+            except Exception as e:
+                print(f"Supabase get_user_by_email error: {e}")
+        return None
+
+    async def save_assessment_to_user(self, result_id: str, user_id: str):
+        """Update assessment to link to user"""
+        if self.enabled:
+            try:
+                self.client.table("assessment_results").update({"user_id": user_id}).eq("result_id", result_id).execute()
+            except Exception as e:
+                print(f"Supabase save_assessment_to_user error: {e}")
+
 # Initialize
 db_service = DatabaseService()

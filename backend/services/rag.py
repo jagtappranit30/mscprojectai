@@ -1,176 +1,186 @@
-import os
+"""
+RAG (Retrieval-Augmented Generation) service for the SME Productivity Assessment Platform.
+
+Design principles (MSc spec):
+- Pure Python — no LangChain, no LlamaIndex.
+- Embeddings: bge-small-en-v1.5 via FastEmbed (ONNX runtime, ~35 MB model).
+- Vector store: Supabase pgvector via the match_documents RPC function.
+- 500-token chunk window, 50-token overlap (word-count approximation).
+- Fallback: if Supabase is unavailable, cosine similarity computed locally with NumPy.
+- ragas dependency removed — it pulls PyTorch and violates the 512 MB memory ceiling.
+"""
+
+from __future__ import annotations
+
 import numpy as np
-from typing import List, Dict, Any, Tuple
-from ..utils.database import db_service
+from typing import Dict, List, Optional, Tuple
+
 from ..utils.config import settings
+from ..utils.database import db_service
+
+# FastEmbed correct class name for text embedding models
+_FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
+_EMBEDDING_DIM = 384
+
 
 class RAGService:
     """
     Custom Retrieval-Augmented Generation implementation.
     Pure Python, no LangChain dependency.
-    Integrates with Supabase pgvector for storage and FastEmbed for embeddings.
     """
-    
+
     def __init__(self):
         self.enabled = False
+        self.embedding_model = None
+        # In-process fallback cache: {run_id: [(chunk_text, embedding_list), ...]}
+        self.mock_chunks: Dict[str, List[Tuple[str, List[float]]]] = {}
+
         try:
-            from fastembed import FlagEmbedding
-            # Initialize embedding model (ONNX format, ~35MB)
-            self.embedding_model = FlagEmbedding(
-                model_name="BAAI/bge-small-en-v1.5",
-                cache_folder="/tmp/fastembed"
+            from fastembed import TextEmbedding  # type: ignore
+            import os
+            self.embedding_model = TextEmbedding(
+                model_name=_FASTEMBED_MODEL,
+                cache_dir=os.getenv("FASTEMBED_CACHE_PATH", "/app/fastembed_cache"),
             )
             self.enabled = True
-            print("FastEmbed initialized successfully.")
-        except Exception as e:
-            print(f"Failed to initialize FastEmbed: {e}. Running RAG in fallback/mock mode.")
-            self.embedding_model = None
-            self.mock_chunks = {}
-    
-    async def chunk_text(self, text: str, chunk_size: int = 500, 
-                        overlap: int = 50) -> List[str]:
+            print(f"FastEmbed initialised: {_FASTEMBED_MODEL}")
+        except Exception as exc:
+            print(
+                f"FastEmbed init failed: {exc}. "
+                "RAG running in local-cosine fallback mode."
+            )
+
+    # ──────────────────────────────────────────────────────────
+    async def chunk_text(
+        self,
+        text: str,
+        chunk_size: int = 500,
+        overlap: int = 50,
+    ) -> List[str]:
         """
-        Split text into chunks.
-        chunk_size: approximate tokens (using word count)
-        overlap: tokens to overlap between chunks
+        Split text into word-count chunks with overlap.
+
+        Parameters
+        ----------
+        text:       Raw document text.
+        chunk_size: Approximate number of words per chunk (≈ tokens for English).
+        overlap:    Number of words shared between consecutive chunks.
         """
         words = text.split()
-        chunks = []
-        
+        chunks: List[str] = []
         start = 0
+
         while start < len(words):
             end = min(start + chunk_size, len(words))
-            chunk = " ".join(words[start:end])
-            chunks.append(chunk)
-            # Break if we've processed everything
+            chunks.append(" ".join(words[start:end]))
             if end >= len(words):
                 break
-            start = end - overlap  # Overlap
-            if start >= len(words) or start < 0:
+            start = end - overlap
+            if start < 0:
                 break
-        
+
         return chunks
-    
+
+    # ──────────────────────────────────────────────────────────
     async def embed_chunks(self, chunks: List[str]) -> List[List[float]]:
-        """Generate embeddings for chunks using FastEmbed"""
-        if not self.enabled or not self.embedding_model:
-            # Fallback mock embedding: 384-dimensional zero-vectors (with slight noise)
-            return [[0.0] * 384 for _ in chunks]
-            
+        """
+        Generate 384-dimensional embeddings for a list of text chunks.
+        Falls back to zero-vectors if FastEmbed is unavailable.
+        """
+        if not self.enabled or self.embedding_model is None:
+            # Zero-vector fallback — preserves pipeline flow without crashing
+            return [[0.0] * _EMBEDDING_DIM for _ in chunks]
+
         try:
-            # FastEmbed's embed returns a generator of numpy arrays
-            embs = list(self.embedding_model.embed(chunks))
-            return [emb.tolist() for emb in embs]
-        except Exception as e:
-            print(f"Error generating embeddings: {e}")
-            return [[0.0] * 384 for _ in chunks]
-    
-    async def store_embeddings(self, run_id: str, chunks: List[str], 
-                              embeddings: List[List[float]]):
-        """Store chunks and embeddings in Supabase pgvector or fallback memory"""
+            embeddings = list(self.embedding_model.embed(chunks))
+            return [emb.tolist() for emb in embeddings]
+        except Exception as exc:
+            print(f"Embedding error: {exc} — returning zero-vectors")
+            return [[0.0] * _EMBEDDING_DIM for _ in chunks]
+
+    # ──────────────────────────────────────────────────────────
+    async def store_embeddings(
+        self,
+        run_id: str,
+        chunks: List[str],
+        embeddings: List[List[float]],
+        source_filename: str = "",
+    ) -> None:
+        """
+        Store text chunks and their embeddings.
+        Primary: Supabase pgvector (document_chunks table).
+        Fallback: in-process dict for mock/local mode.
+        """
         if db_service.enabled:
             try:
-                rows = []
-                for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                    rows.append({
+                rows = [
+                    {
                         "run_id": run_id,
                         "chunk_index": i,
-                        "chunk_text": chunk,
-                        "embedding": emb  # pgvector stores as float array
-                    })
+                        "content": chunk,
+                        "embedding": emb,
+                        "source_filename": source_filename,
+                    }
+                    for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+                ]
                 db_service.client.table("document_chunks").insert(rows).execute()
                 return
-            except Exception as e:
-                print(f"Supabase store_embeddings error: {e}")
-        
-        # Fallback cache
-        self.mock_chunks[run_id] = list(zip(chunks, embeddings))
-    
-    async def retrieve_context(self, query: str, run_id: str, 
-                              top_k: int = 3) -> List[str]:
+            except Exception as exc:
+                print(f"Supabase store_embeddings error: {exc} — using local cache")
+
+        # Local fallback cache
+        existing = self.mock_chunks.get(run_id, [])
+        existing.extend(zip(chunks, embeddings))
+        self.mock_chunks[run_id] = existing
+
+    # ──────────────────────────────────────────────────────────
+    async def retrieve_context(
+        self,
+        query: str,
+        run_id: str,
+        top_k: int = 5,
+    ) -> List[str]:
         """
-        Retrieve top-k most relevant chunks for a query.
-        Uses cosine similarity via pgvector HNSW indexing if enabled,
-        else fallback numpy cosine similarity.
+        Retrieve the top-k most relevant text chunks for a query string.
+
+        Primary path: Supabase pgvector cosine similarity via match_documents RPC.
+        Fallback:     NumPy cosine similarity over the in-process cache.
         """
+        # Embed the query
+        query_emb = (await self.embed_chunks([query]))[0]
+
         if db_service.enabled:
             try:
-                # Embed the query
-                query_emb = await self.embed_chunks([query])
-                
-                # Query Supabase with vector similarity
                 response = db_service.client.rpc(
                     "match_documents",
                     {
-                        "query_embedding": query_emb[0],
+                        "query_embedding": query_emb,
                         "match_count": top_k,
-                        "p_run_id": run_id
-                    }
+                        "p_run_id": run_id,
+                    },
                 ).execute()
-                
                 if response.data:
                     return [item["chunk_text"] for item in response.data]
-            except Exception as e:
-                print(f"Supabase retrieve_context error: {e}, falling back to local search")
-        
-        # Local fallback numpy/python similarity search
+            except Exception as exc:
+                print(f"Supabase retrieve_context error: {exc} — falling back to local search")
+
+        # NumPy cosine similarity fallback
         run_data = self.mock_chunks.get(run_id, [])
         if not run_data:
             return []
-            
-        query_emb = (await self.embed_chunks([query]))[0]
+
         q_vec = np.array(query_emb)
-        
-        similarities = []
+        scores: List[Tuple[str, float]] = []
+
         for chunk, emb in run_data:
             c_vec = np.array(emb)
-            # Compute cosine similarity: (A . B) / (||A|| * ||B||)
             denom = np.linalg.norm(q_vec) * np.linalg.norm(c_vec)
-            sim = np.dot(q_vec, c_vec) / denom if denom > 0 else 0.0
-            similarities.append((chunk, sim))
-            
-        # Sort by similarity descending
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        return [item[0] for item in similarities[:top_k]]
-    
-    async def evaluate_with_ragas(self, 
-                                 query: str,
-                                 generated_answer: str,
-                                 retrieved_context: List[str]) -> Dict:
-        """
-        Evaluate RAG quality using RAGAS metrics.
-        """
-        try:
-            from ragas.metrics import faithfulness, context_precision, context_recall
-            from ragas import evaluate
-            from datasets import Dataset
-            
-            # Create evaluation dataset
-            eval_dataset = Dataset.from_dict({
-                "question": [query],
-                "contexts": [[c for c in retrieved_context]],
-                "answer": [generated_answer]
-            })
-            
-            # Calculate metrics
-            result = evaluate(
-                eval_dataset,
-                metrics=[faithfulness, context_precision, context_recall]
-            )
-            
-            return {
-                "faithfulness": float(result.get("faithfulness", 0.0)),
-                "context_precision": float(result.get("context_precision", 0.0)),
-                "context_recall": float(result.get("context_recall", 0.0))
-            }
-        except Exception as e:
-            # Fallback evaluation score dictionary
-            return {
-                "faithfulness": 0.85,
-                "context_precision": 0.90,
-                "context_recall": 0.80,
-                "note": "Evaluation completed using standard heuristic metrics"
-            }
+            sim = float(np.dot(q_vec, c_vec) / denom) if denom > 0 else 0.0
+            scores.append((chunk, sim))
 
-# Initialize
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return [chunk for chunk, _ in scores[:top_k]]
+
+
+# Module-level singleton
 rag_service = RAGService()

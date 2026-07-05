@@ -1,11 +1,10 @@
-name: Deploy to Render on Push to Main
+name: CI — Run Tests on Pull Request
 
 on:
-  push:
+  pull_request:
     branches: [main]
 
 jobs:
-  # ── Step 1: Run tests (must pass before deploy) ───────────────
   test:
     runs-on: ubuntu-latest
 
@@ -33,17 +32,3 @@ jobs:
           SUPABASE_JWT_SECRET: "placeholder"
         run: |
           pytest tests/ -v --tb=short --asyncio-mode=auto
-        # No continue-on-error — test failures must block deploy
-
-  # ── Step 2: Deploy to Render (only if tests pass) ─────────────
-  deploy:
-    needs: test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Trigger Render deploy
-        run: |
-          curl --fail \
-            "https://api.render.com/deploy/svc/${{ secrets.RENDER_SERVICE_ID }}?key=${{ secrets.RENDER_API_KEY }}" \
-            -X POST
-        # curl --fail exits non-zero on HTTP 4xx/5xx, failing the job
