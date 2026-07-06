@@ -18,32 +18,66 @@ import streamlit as st
 from pathlib import Path
 from typing import Any, Dict, List
 
-# ── Resolve project root (works both locally and on Streamlit Cloud) ────────
+# ── Detect environment ──────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-API_BASE_URL = os.getenv("API_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:8000"))
-_BACKEND_PORT = 8000
-_BACKEND_LOG  = _PROJECT_ROOT / "backend_startup.log"
+
+# Streamlit Cloud mounts the repo under /mount/src — reliable detection
+_ON_STREAMLIT_CLOUD = (
+    Path("/mount/src").exists()
+    or os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit_sharing"
+    or "streamlit.io" in os.environ.get("HOSTNAME", "")
+)
+
+# Resolve API_BASE_URL — Streamlit Cloud secrets inject as env vars
+_CONFIGURED_URL = os.environ.get("API_BASE_URL", "").strip()
+_RENDER_URL     = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+
+if _CONFIGURED_URL and "127.0.0.1" not in _CONFIGURED_URL and "localhost" not in _CONFIGURED_URL:
+    # Explicit external URL set in secrets — use it
+    API_BASE_URL = _CONFIGURED_URL
+elif _RENDER_URL and "127.0.0.1" not in _RENDER_URL and "localhost" not in _RENDER_URL:
+    # Render injected its own public URL (only happens on Render backend, not Streamlit Cloud)
+    API_BASE_URL = _RENDER_URL
+else:
+    # Local development fallback
+    API_BASE_URL = "http://127.0.0.1:8000"
+
+_USE_SUBPROCESS = (API_BASE_URL == "http://127.0.0.1:8000") and not _ON_STREAMLIT_CLOUD
+_BACKEND_PORT   = 8000
+_BACKEND_LOG    = _PROJECT_ROOT / "backend_startup.log"
+
 
 def _backend_is_up() -> bool:
-    """Return True if something is accepting connections on the backend port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
         return s.connect_ex(("127.0.0.1", _BACKEND_PORT)) == 0
 
+
 def start_backend_if_needed() -> None:
     """
-    Spawn the FastAPI backend as a subprocess if it is not already running.
-    - Sets cwd to project root so `backend.main:app` resolves correctly.
-    - Forwards all current environment variables (Streamlit secrets included).
-    - Writes backend stderr to a log file for debugging.
-    - Polls until the port is open or 90 seconds elapse.
+    On Streamlit Cloud: never spawns a subprocess — shows config error instead.
+    Locally: spawns uvicorn if not already running, polls until ready.
     """
-    if _backend_is_up():
-        return   # already running — nothing to do
+    # ── Streamlit Cloud without external URL configured ────────
+    if _ON_STREAMLIT_CLOUD and not _USE_SUBPROCESS:
+        if "127.0.0.1" in API_BASE_URL or "localhost" in API_BASE_URL:
+            st.error(
+                "**Backend not configured.** "
+                "Add `API_BASE_URL = \"https://mscprojectai.onrender.com\"` "
+                "to your Streamlit Cloud **Settings → Secrets**, then reboot the app."
+            )
+            st.stop()
+        # External URL is configured — skip subprocess entirely
+        return
 
-    # Build environment: inherit everything (includes Streamlit secrets injected as env vars)
+    # ── Local development: spawn subprocess ────────────────────
+    if not _USE_SUBPROCESS:
+        return  # external URL set locally too — skip subprocess
+
+    if _backend_is_up():
+        return
+
     env = {**os.environ}
-    # Ensure PYTHONPATH includes the project root so `backend` package is importable
     existing_path = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{_PROJECT_ROOT}{os.pathsep}{existing_path}" if existing_path else str(_PROJECT_ROOT)
     env["FASTEMBED_CACHE_PATH"] = "/tmp/fastembed_cache"
@@ -51,23 +85,14 @@ def start_backend_if_needed() -> None:
     try:
         log_fh = open(_BACKEND_LOG, "w")
         subprocess.Popen(
-            [
-                sys.executable, "-m", "uvicorn",
-                "backend.main:app",
-                "--host", "127.0.0.1",
-                "--port", str(_BACKEND_PORT),
-                "--log-level", "info",
-            ],
-            cwd=str(_PROJECT_ROOT),
-            env=env,
-            stdout=log_fh,
-            stderr=log_fh,
+            [sys.executable, "-m", "uvicorn", "backend.main:app",
+             "--host", "127.0.0.1", "--port", str(_BACKEND_PORT), "--log-level", "info"],
+            cwd=str(_PROJECT_ROOT), env=env, stdout=log_fh, stderr=log_fh,
         )
     except Exception as e:
         st.error(f"Failed to start the backend process: {e}")
         return
 
-    # Poll until backend is up (max 90 s) — show a non-intrusive status line
     status = st.empty()
     for elapsed in range(90):
         if _backend_is_up():
@@ -76,11 +101,7 @@ def start_backend_if_needed() -> None:
         status.info(f"⏳ Starting analysis engine… ({elapsed + 1}s)")
         time.sleep(1)
 
-    status.error(
-        "The backend did not start within 90 seconds. "
-        f"Check `{_BACKEND_LOG}` for details."
-    )
-
+    status.error(f"Backend did not start within 90s. Check `{_BACKEND_LOG}`.")
 
 # ── Page Config ────────────────────────────────────────────────
 st.set_page_config(
@@ -1134,6 +1155,38 @@ def _run_assessment(
 
         if i == len(stages) - 1:
             try:
+                # ── Step 0: Warm up Render if it's cold-starting ──────
+                # Free-tier instances spin down after inactivity.
+                # Ping /health until it responds before sending the heavy request.
+                _warmup_ok = False
+                for _w in range(60):   # max 60s warm-up wait
+                    try:
+                        _hr = requests.get(f"{API_BASE_URL}/health", timeout=5)
+                        if _hr.status_code == 200:
+                            _warmup_ok = True
+                            break
+                    except Exception:
+                        pass
+                    status_placeholder.markdown(f"""
+                    <div class="loading-card">
+                      <div class="loader-spinner"></div>
+                      <div class="step-indicator" style="margin-bottom:12px;">Warming up backend…</div>
+                      <h3 style="margin:0 0 8px 0;color:#F5F6FA;font-size:18px;">
+                        Starting analysis engine ({_w+1}s)
+                      </h3>
+                      <p style="color:#9AA3B5;font-size:13px;margin:0;" class="pulsing">
+                        Render free tier is waking up — this happens only on first use.
+                      </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    time.sleep(1)
+
+                if not _warmup_ok:
+                    status_placeholder.empty()
+                    st.error("Backend did not wake up in time. Please try again in 30 seconds.")
+                    st.stop()
+
+                # ── Step 1: Submit with retry on 502/503 ──────────────
                 file_tuples = [
                     ("files", (f.name, f.getvalue(), "application/octet-stream"))
                     for f in uploaded_files
@@ -1142,17 +1195,40 @@ def _run_assessment(
                     "company_name": company_name or "Unknown",
                     "sector": sector,
                 }
-                
-                response = requests.post(
-                    f"{API_BASE_URL}/assess",
-                    files=file_tuples,
-                    data=data,
-                    timeout=240,
-                )
+
+                response = None
+                for _attempt in range(3):
+                    try:
+                        response = requests.post(
+                            f"{API_BASE_URL}/assess",
+                            files=file_tuples,
+                            data=data,
+                            timeout=240,
+                        )
+                        if response.status_code not in (502, 503):
+                            break   # success or a real error — don't retry
+                        # 502/503 = backend restarting mid-request — wait and retry
+                        status_placeholder.info(
+                            f"⚠️ Backend restarting (attempt {_attempt + 1}/3)… waiting 15s"
+                        )
+                        time.sleep(15)
+                        # re-open files for next attempt
+                        file_tuples = [
+                            ("files", (f.name, f.getvalue(), "application/octet-stream"))
+                            for f in uploaded_files
+                        ]
+                    except requests.exceptions.Timeout:
+                        if _attempt < 2:
+                            status_placeholder.info(f"⚠️ Request timed out (attempt {_attempt + 1}/3)… retrying")
+                            time.sleep(5)
+                        else:
+                            raise
 
                 status_placeholder.empty()
 
-                if response.status_code == 200:
+                if response is None:
+                    st.error("No response received from backend after 3 attempts.")
+                elif response.status_code == 200:
                     body = response.json()
                     if body.get("status") == "success":
                         st.session_state.assessment_result = body["result"]
