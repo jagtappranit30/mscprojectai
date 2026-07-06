@@ -1142,10 +1142,19 @@ def _run_assessment(
                     else:
                         st.error(f"Assessment failed: {body.get('message', 'Unknown error')}")
                 else:
-                    st.error(f"API error {response.status_code}: {response.text[:400]}")
-            except requests.exceptions.ConnectionError:
+                    detail = response.text[:800] or "(empty response body)"
+                    st.error(f"API error {response.status_code}")
+                    with st.expander("Show error detail"):
+                        st.code(detail)
+            except requests.exceptions.ConnectionError as ce:
                 status_placeholder.empty()
-                st.error("Connection failed. Ensure the FastAPI backend is running locally on http://localhost:8000")
+                st.error(
+                    "Could not reach the backend. "
+                    "If you are on Streamlit Cloud, set `API_BASE_URL` in your Streamlit Secrets "
+                    "to your Render backend URL (e.g. `https://mscprojectai.onrender.com`)."
+                )
+                with st.expander("Technical detail"):
+                    st.code(str(ce))
             except Exception as exc:
                 status_placeholder.empty()
                 st.error(f"Error during analysis: {exc}")
