@@ -202,10 +202,38 @@ class ExtractionService:
         return response.choices[0].message.content.strip()
 
     async def _call_groq_async(self, prompt: str) -> str:
-        """Non-blocking wrapper around _call_groq using asyncio.to_thread."""
+        """
+        Non-blocking wrapper around _call_groq using asyncio.to_thread.
+        Includes a retry-on-rate-limit (429) loop with automatic backoff.
+        """
         import asyncio
+        import re
 
-        return await asyncio.to_thread(self._call_groq, prompt)
+        for attempt in range(4):
+            try:
+                return await asyncio.to_thread(self._call_groq, prompt)
+            except Exception as exc:
+                is_rate_limit = False
+                if getattr(exc, "status_code", None) == 429:
+                    is_rate_limit = True
+                elif "429" in str(exc) or "rate limit" in str(exc).lower():
+                    is_rate_limit = True
+
+                if is_rate_limit and attempt < 3:
+                    # Default exponential wait
+                    wait_time = 4.0 * (2 ** attempt)
+                    # Try to parse the exact wait time required by Groq's error message
+                    # e.g. "Please try again in 33.675s."
+                    match = re.search(r"try again in ([\d\.]+)s", str(exc))
+                    if match:
+                        wait_time = float(match.group(1)) + 0.5  # Add a tiny safety buffer
+
+                    print(f"Groq Rate Limit (429) encountered. Retrying in {wait_time:.2f}s (attempt {attempt + 1}/4)...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise exc
+
+        raise RuntimeError("Failed to complete Groq call after retries")
 
     # ──────────────────────────────────────────────────────────
     def _parse_llm_response(
@@ -305,6 +333,9 @@ class ExtractionService:
         retrieval_results = await asyncio.gather(*retrieval_tasks)
         retrieved_map: Dict[str, List[str]] = dict(retrieval_results)
 
+        # Semaphore of 2 limits concurrent Groq requests to avoid rate limit spikes (TPM)
+        sem = asyncio.Semaphore(2)
+
         # ── Step 2: Run all Groq calls concurrently ───────────
         async def _extract_one(
             metric_name: str, unit_hint: str
@@ -332,7 +363,8 @@ class ExtractionService:
             prompt = _build_extraction_prompt(metric_name, unit_hint, retrieved)
 
             try:
-                raw_response = await self._call_groq_async(prompt)
+                async with sem:
+                    raw_response = await self._call_groq_async(prompt)
             except Exception as exc:
                 return (
                     metric_name,
