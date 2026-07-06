@@ -158,7 +158,7 @@ class RAGService:
                         "embedding": emb,
                         "source_filename": source_filename,
                     }
-                    for i, (chunk, emb) in enumerate(zip(chunks, embeddings, strict=False))
+                    for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
                 ]
                 db_service.client.table("document_chunks").insert(rows).execute()
                 return
@@ -167,7 +167,7 @@ class RAGService:
 
         # Local fallback cache
         existing = self.mock_chunks.get(run_id, [])
-        existing.extend(zip(chunks, embeddings, strict=False))
+        existing.extend(zip(chunks, embeddings))
         self.mock_chunks[run_id] = existing
 
     # ──────────────────────────────────────────────────────────
