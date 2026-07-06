@@ -1046,6 +1046,25 @@ def render_input_page() -> None:
         st.markdown('<div class="step-indicator">Step 1 of 2</div>', unsafe_allow_html=True)
         st.markdown('<h2 style="margin: 0 0 20px 0; font-size:22px;">New Productivity Assessment</h2>', unsafe_allow_html=True)
         
+        # ── Backend health diagnostic banner ──────────────────────
+        _is_subprocess = "127.0.0.1" in API_BASE_URL or "localhost" in API_BASE_URL
+        _backend_mode  = "🔴 Local subprocess" if _is_subprocess else f"🟢 Render: {API_BASE_URL}"
+        try:
+            _health = requests.get(f"{API_BASE_URL}/health", timeout=8)
+            _health_status = "✅ Online" if _health.status_code == 200 else f"⚠️ HTTP {_health.status_code}"
+        except Exception as _he:
+            _health_status = f"❌ Unreachable ({type(_he).__name__})"
+        with st.expander(f"Backend status — {_health_status}", expanded=_is_subprocess or "❌" in _health_status):
+            st.caption(f"**Mode:** {_backend_mode}")
+            st.caption(f"**Health:** {_health_status}")
+            if _is_subprocess:
+                st.warning(
+                    "The app is calling the local subprocess backend (localhost). "
+                    "To use the Render backend, add `API_BASE_URL = \"https://mscprojectai.onrender.com\"` "
+                    "to your Streamlit Cloud **Settings → Secrets** and reboot the app."
+                )
+        # ─────────────────────────────────────────────────────────
+
         # Sector setup
         sector = st.selectbox(
             "Business Sector (required)",
