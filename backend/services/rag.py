@@ -40,7 +40,7 @@ class RAGService:
             import os
             self.embedding_model = TextEmbedding(
                 model_name=_FASTEMBED_MODEL,
-                cache_dir=os.getenv("FASTEMBED_CACHE_PATH", "/app/fastembed_cache"),
+                cache_dir=os.getenv("FASTEMBED_CACHE_PATH", "/tmp/fastembed_cache"),
             )
             self.enabled = True
             print(f"FastEmbed initialised: {_FASTEMBED_MODEL}")

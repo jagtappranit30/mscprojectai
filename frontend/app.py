@@ -1083,7 +1083,7 @@ def _run_assessment(
                     f"{API_BASE_URL}/assess",
                     files=file_tuples,
                     data=data,
-                    timeout=120,
+                    timeout=240,
                 )
 
                 status_placeholder.empty()

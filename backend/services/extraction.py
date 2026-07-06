@@ -201,6 +201,11 @@ class ExtractionService:
         )
         return response.choices[0].message.content.strip()
 
+    async def _call_groq_async(self, prompt: str) -> str:
+        """Non-blocking wrapper around _call_groq using asyncio.to_thread."""
+        import asyncio
+        return await asyncio.to_thread(self._call_groq, prompt)
+
     # ──────────────────────────────────────────────────────────
     def _parse_llm_response(
         self,
@@ -264,6 +269,7 @@ class ExtractionService:
     ) -> Tuple[ExtractedMetrics, List[ConflictWarning], List[ExtractionError], Dict[str, str]]:
         """
         Run per-metric RAG retrieval + Groq extraction for all required metrics.
+        All Groq calls are dispatched concurrently via asyncio.gather for speed.
 
         Returns
         -------
@@ -272,65 +278,76 @@ class ExtractionService:
         extraction_errors: List of structured errors for metrics that failed validation.
         source_passages:  Dict[metric_name → source passage text] for traceability.
         """
+        import asyncio
+
         extraction_results: Dict[str, ExtractionResult] = {}
         conflict_warnings: List[ConflictWarning] = []
         extraction_errors: List[ExtractionError] = []
         source_passages: Dict[str, str] = {}
 
-        for metric_name, query, unit_hint in EXTRACTION_QUERIES:
-            # Skip digital indicator metrics — handled separately below
-            if metric_name in ("digital_tools", "automation"):
-                continue
+        # ── Step 1: Run all RAG retrievals concurrently ───────
+        numeric_metrics = [
+            (metric_name, query, unit_hint)
+            for metric_name, query, unit_hint in EXTRACTION_QUERIES
+            if metric_name not in ("digital_tools", "automation")
+        ]
 
-            # Step 1: RAG retrieval — top-5 relevant chunks
+        async def _retrieve_one(metric_name: str, query: str) -> Tuple[str, List[str]]:
             try:
-                retrieved = await rag_service.retrieve_context(
+                results = await rag_service.retrieve_context(
                     query=query, run_id=run_id, top_k=5
                 )
+                return metric_name, results
             except Exception as exc:
                 print(f"RAG retrieval failed for {metric_name}: {exc}")
-                retrieved = []
+                return metric_name, []
+
+        retrieval_tasks = [_retrieve_one(m, q) for m, q, _ in numeric_metrics]
+        retrieval_results = await asyncio.gather(*retrieval_tasks)
+        retrieved_map: Dict[str, List[str]] = dict(retrieval_results)
+
+        # ── Step 2: Run all Groq calls concurrently ───────────
+        async def _extract_one(
+            metric_name: str, unit_hint: str
+        ) -> Tuple[str, Optional[ExtractionResult], Optional[ExtractionError]]:
+            retrieved = retrieved_map.get(metric_name, [])
 
             if not retrieved:
-                extraction_results[metric_name] = ExtractionResult(
-                    metric_name=metric_name,
-                    value=None,
-                    confidence=0.0,
-                    source_passage="",
-                )
-                continue
+                return metric_name, ExtractionResult(
+                    metric_name=metric_name, value=None, confidence=0.0, source_passage=""
+                ), None
 
             if not self.enabled:
-                # No Groq — record as not found
-                extraction_results[metric_name] = ExtractionResult(
-                    metric_name=metric_name,
-                    value=None,
-                    confidence=0.0,
-                    source_passage="",
-                )
-                continue
+                return metric_name, ExtractionResult(
+                    metric_name=metric_name, value=None, confidence=0.0, source_passage=""
+                ), None
 
-            # Step 2: Build delimited prompt (with injection sanitisation)
             prompt = _build_extraction_prompt(metric_name, unit_hint, retrieved)
 
-            # Step 3: Call Groq
             try:
-                raw_response = self._call_groq(prompt)
+                raw_response = await self._call_groq_async(prompt)
             except Exception as exc:
-                extraction_errors.append(ExtractionError(
+                return metric_name, None, ExtractionError(
                     metric_name=metric_name,
                     raw_response="",
                     error_detail=f"Groq API error: {exc}",
-                ))
-                continue
+                )
 
-            # Step 4: Parse + validate (strict — no fallback)
             result, error = self._parse_llm_response(metric_name, raw_response, retrieved)
+            return metric_name, result, error
+
+        groq_tasks = [_extract_one(m, u) for m, _, u in numeric_metrics]
+        groq_results = await asyncio.gather(*groq_tasks)
+
+        # ── Step 3: Collect results + conflict detection ───────
+        for metric_name, result, error in groq_results:
             if error:
                 extraction_errors.append(error)
                 continue
+            if result is None:
+                continue
 
-            # Step 5: Conflict detection — compare against any previously extracted value
+            # Conflict detection (unlikely with parallel calls, but preserved for correctness)
             if metric_name in extraction_results:
                 existing = extraction_results[metric_name]
                 if (
@@ -348,15 +365,13 @@ class ExtractionService:
                             passage_b=result.source_passage,
                             discrepancy_pct=discrepancy,
                         ))
-                        # Do NOT silently pick one — keep the first (higher confidence)
-                        # and leave the conflict visible to the user
                         continue
 
             extraction_results[metric_name] = result
             if result.source_passage:
                 source_passages[metric_name] = result.source_passage
 
-        # ── Digital maturity extraction ───────────────────────
+        # ── Digital maturity extraction (concurrent with nothing, runs separately) ──
         digital_tools, automation_detected, process_indicators = (
             await self._extract_digital_indicators(run_id, rag_service)
         )
@@ -370,7 +385,6 @@ class ExtractionService:
             v = _val(name)
             return int(round(v)) if v is not None else None
 
-        # Overall confidence = mean of per-metric confidences for found metrics
         found_confidences = [
             r.confidence for r in extraction_results.values()
             if r.value is not None
