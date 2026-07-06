@@ -9,30 +9,78 @@ Key Screens:
 """
 
 import time
-import requests
-import streamlit as st
+import os
 import sys
 import socket
 import subprocess
+import requests
+import streamlit as st
+from pathlib import Path
 from typing import Any, Dict, List
 
-def start_backend_if_needed() -> None:
-    port = 8000
+# ── Resolve project root (works both locally and on Streamlit Cloud) ────────
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+API_BASE_URL = os.getenv("API_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", "http://127.0.0.1:8000"))
+_BACKEND_PORT = 8000
+_BACKEND_LOG  = _PROJECT_ROOT / "backend_startup.log"
+
+def _backend_is_up() -> bool:
+    """Return True if something is accepting connections on the backend port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        is_open = s.connect_ex(('127.0.0.1', port)) == 0
-        
-    if not is_open:
-        try:
-            # Launch FastAPI backend as a background process using the current python executable
-            subprocess.Popen(
-                [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", str(port)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            # Short sleep to let the server spin up
-            time.sleep(2.5)
-        except Exception as e:
-            st.warning(f"Could not automatically launch the backend process: {e}")
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", _BACKEND_PORT)) == 0
+
+def start_backend_if_needed() -> None:
+    """
+    Spawn the FastAPI backend as a subprocess if it is not already running.
+    - Sets cwd to project root so `backend.main:app` resolves correctly.
+    - Forwards all current environment variables (Streamlit secrets included).
+    - Writes backend stderr to a log file for debugging.
+    - Polls until the port is open or 90 seconds elapse.
+    """
+    if _backend_is_up():
+        return   # already running — nothing to do
+
+    # Build environment: inherit everything (includes Streamlit secrets injected as env vars)
+    env = {**os.environ}
+    # Ensure PYTHONPATH includes the project root so `backend` package is importable
+    existing_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{_PROJECT_ROOT}{os.pathsep}{existing_path}" if existing_path else str(_PROJECT_ROOT)
+    env["FASTEMBED_CACHE_PATH"] = "/tmp/fastembed_cache"
+
+    try:
+        log_fh = open(_BACKEND_LOG, "w")
+        subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn",
+                "backend.main:app",
+                "--host", "127.0.0.1",
+                "--port", str(_BACKEND_PORT),
+                "--log-level", "info",
+            ],
+            cwd=str(_PROJECT_ROOT),
+            env=env,
+            stdout=log_fh,
+            stderr=log_fh,
+        )
+    except Exception as e:
+        st.error(f"Failed to start the backend process: {e}")
+        return
+
+    # Poll until backend is up (max 90 s) — show a non-intrusive status line
+    status = st.empty()
+    for elapsed in range(90):
+        if _backend_is_up():
+            status.empty()
+            return
+        status.info(f"⏳ Starting analysis engine… ({elapsed + 1}s)")
+        time.sleep(1)
+
+    status.error(
+        "The backend did not start within 90 seconds. "
+        f"Check `{_BACKEND_LOG}` for details."
+    )
+
 
 # ── Page Config ────────────────────────────────────────────────
 st.set_page_config(
@@ -41,9 +89,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
-import os
-API_BASE_URL = os.getenv("API_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000"))
 
 # ── Session State Initialisation ──────────────────────────────
 if "page" not in st.session_state:
