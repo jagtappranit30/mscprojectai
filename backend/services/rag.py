@@ -8,17 +8,20 @@ Design principles (MSc spec):
 - 500-token chunk window, 50-token overlap (word-count approximation).
 - Fallback: if Supabase is unavailable, cosine similarity computed locally with NumPy.
 - ragas dependency removed — it pulls PyTorch and violates the 512 MB memory ceiling.
+- FastEmbed is lazy-loaded (first use only) to keep startup RAM below Render free-tier limit.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+import gc
+import os
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ..utils.database import db_service
 
-# FastEmbed correct class name for text embedding models
+# FastEmbed model identifier
 _FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
 _EMBEDDING_DIM = 384
 
@@ -27,27 +30,57 @@ class RAGService:
     """
     Custom Retrieval-Augmented Generation implementation.
     Pure Python, no LangChain dependency.
+
+    FastEmbed is intentionally NOT loaded at __init__ time.
+    It is loaded on the first call to embed_chunks() to keep the
+    Render free-tier startup footprint below 512 MB.
     """
 
     def __init__(self):
-        self.enabled = False
-        self.embedding_model = None
+        # _embedding_model is None until first use (lazy init)
+        self._embedding_model: Optional[object] = None
+        self._embed_tried: bool = False   # avoid retrying after a failed load
         # In-process fallback cache: {run_id: [(chunk_text, embedding_list), ...]}
         self.mock_chunks: Dict[str, List[Tuple[str, List[float]]]] = {}
 
-        try:
-            import os
+    # ──────────────────────────────────────────────────────────
+    @property
+    def enabled(self) -> bool:
+        """True once FastEmbed has been successfully loaded."""
+        return self._embedding_model is not None
 
+    def _load_fastembed(self) -> None:
+        """
+        Load the FastEmbed model on first use.
+        Called lazily from embed_chunks() — never at startup.
+        """
+        if self._embed_tried:
+            return   # already attempted (success or failure)
+        self._embed_tried = True
+        try:
             from fastembed import TextEmbedding  # type: ignore
 
-            self.embedding_model = TextEmbedding(
+            self._embedding_model = TextEmbedding(
                 model_name=_FASTEMBED_MODEL,
                 cache_dir=os.getenv("FASTEMBED_CACHE_PATH", "/tmp/fastembed_cache"),
             )
-            self.enabled = True
-            print(f"FastEmbed initialised: {_FASTEMBED_MODEL}")
+            print(f"FastEmbed initialised (lazy): {_FASTEMBED_MODEL}")
         except Exception as exc:
-            print(f"FastEmbed init failed: {exc}. RAG running in local-cosine fallback mode.")
+            print(
+                f"FastEmbed lazy-init failed: {exc}. "
+                "RAG running in local-cosine fallback mode."
+            )
+
+    def unload_fastembed(self) -> None:
+        """
+        Release the FastEmbed model from memory and run GC.
+        Call after a request completes to reclaim RAM on the free tier.
+        """
+        if self._embedding_model is not None:
+            self._embedding_model = None
+            self._embed_tried = False   # allow reload on next request
+            gc.collect()
+            print("FastEmbed unloaded from memory (GC triggered).")
 
     # ──────────────────────────────────────────────────────────
     async def chunk_text(
@@ -84,14 +117,19 @@ class RAGService:
     async def embed_chunks(self, chunks: List[str]) -> List[List[float]]:
         """
         Generate 384-dimensional embeddings for a list of text chunks.
+        Triggers lazy FastEmbed load on first call.
         Falls back to zero-vectors if FastEmbed is unavailable.
         """
-        if not self.enabled or self.embedding_model is None:
+        # Lazy-load model on first actual embedding request
+        if not self.enabled:
+            self._load_fastembed()
+
+        if not self.enabled:
             # Zero-vector fallback — preserves pipeline flow without crashing
             return [[0.0] * _EMBEDDING_DIM for _ in chunks]
 
         try:
-            embeddings = list(self.embedding_model.embed(chunks))
+            embeddings = list(self._embedding_model.embed(chunks))  # type: ignore[union-attr]
             return [emb.tolist() for emb in embeddings]
         except Exception as exc:
             print(f"Embedding error: {exc} — returning zero-vectors")

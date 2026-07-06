@@ -259,7 +259,7 @@ async def assess_productivity(
             pipeline_stages=pipeline_stages,
         )
 
-        return JSONResponse(
+        result = JSONResponse(
             status_code=200,
             content={
                 "status": "success",
@@ -267,11 +267,15 @@ async def assess_productivity(
                 "result": output.model_dump(mode="json"),
             },
         )
+        # Free FastEmbed model from RAM after each request (Render 512 MB limit)
+        rag_service.unload_fastembed()
+        return result
 
     except Exception as exc:
         import traceback
 
         traceback.print_exc()
+        rag_service.unload_fastembed()   # free RAM even on failure
         if run_id:
             await db_service.update_run_status(run_id, "failed", error_message=str(exc))
         return JSONResponse(
