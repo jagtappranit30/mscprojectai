@@ -11,7 +11,28 @@ Key Screens:
 import time
 import requests
 import streamlit as st
+import sys
+import socket
+import subprocess
 from typing import Any, Dict, List
+
+def start_backend_if_needed() -> None:
+    port = 8000
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        is_open = s.connect_ex(('127.0.0.1', port)) == 0
+        
+    if not is_open:
+        try:
+            # Launch FastAPI backend as a background process using the current python executable
+            subprocess.Popen(
+                [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", str(port)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            # Short sleep to let the server spin up
+            time.sleep(2.5)
+        except Exception as e:
+            st.warning(f"Could not automatically launch the backend process: {e}")
 
 # ── Page Config ────────────────────────────────────────────────
 st.set_page_config(
@@ -1425,6 +1446,7 @@ def render_methodology_page() -> None:
 
 # ── Main Application Router ────────────────────────────────────
 def main() -> None:
+    start_backend_if_needed()
     inject_custom_css()
     render_header()
     
