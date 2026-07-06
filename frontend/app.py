@@ -839,6 +839,7 @@ def _render_benchmark_slider(score: float, p25: float = 25, p50: float = 50, p75
     """
 
 def _render_metrics_table(metrics_list: List[Dict[str, Any]]) -> str:
+    import textwrap
     rows = []
     pretty_names = {
         "revenue_per_employee": "Revenue per Employee",
@@ -877,16 +878,15 @@ def _render_metrics_table(metrics_list: List[Dict[str, Any]]) -> str:
             norm = m.get("normalised_score", 0.0)
             score_str = f"{norm:.1f}"
             
-        rows.append(f"""
+        rows.append(textwrap.dedent(f"""\
         <tr>
           <td>{name}</td>
           <td class="metric-value" style="text-align: right;">{val_str}</td>
           <td style="text-align: right; color: #5C6478;">{p50_str}</td>
           <td style="text-align: right; font-weight: 600; color: #F5F6FA;">{score_str}</td>
-        </tr>
-        """)
+        </tr>"""))
         
-    return f"""
+    return textwrap.dedent(f"""\
     <table class="metrics-table">
       <thead>
         <tr>
@@ -899,8 +899,7 @@ def _render_metrics_table(metrics_list: List[Dict[str, Any]]) -> str:
       <tbody>
         {"".join(rows)}
       </tbody>
-    </table>
-    """
+    </table>""")
 
 def _render_pillar_dashboard(pillar: Dict[str, Any], title: str, icon_svg: str) -> None:
     score = pillar.get("score", 0.0)
