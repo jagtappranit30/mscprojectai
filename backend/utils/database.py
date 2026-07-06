@@ -9,6 +9,28 @@ class DatabaseService:
     def __init__(self):
         self.url = settings.SUPABASE_URL
         self.key = settings.SUPABASE_KEY
+        
+        # Always initialize mock structures to prevent AttributeErrors on DB query failures
+        self.mock_runs = {}
+        self.mock_metrics = {}
+        self.mock_results = {}
+        self.mock_benchmarks = {
+            ('Manufacturing', 'revenue_per_employee'): {"p25": 120000, "p50": 175000, "p75": 240000},
+            ('Manufacturing', 'output_per_payroll'): {"p25": 3.5, "p50": 4.2, "p75": 5.1},
+            ('Manufacturing', 'gross_margin'): {"p25": 25, "p50": 35, "p75": 45},
+            ('Manufacturing', 'operating_margin'): {"p25": 5, "p50": 12, "p75": 20},
+            
+            ('Services', 'revenue_per_employee'): {"p25": 100000, "p50": 145000, "p75": 210000},
+            ('Services', 'output_per_payroll'): {"p25": 2.8, "p50": 3.8, "p75": 4.9},
+            ('Services', 'gross_margin'): {"p25": 40, "p50": 55, "p75": 70},
+            ('Services', 'operating_margin'): {"p25": 8, "p50": 18, "p75": 28},
+            
+            ('Retail', 'revenue_per_employee'): {"p25": 150000, "p50": 190000, "p75": 250000},
+            ('Retail', 'output_per_payroll'): {"p25": 4.2, "p50": 5.3, "p75": 6.5},
+            ('Retail', 'gross_margin'): {"p25": 20, "p50": 28, "p75": 38},
+            ('Retail', 'operating_margin'): {"p25": 2, "p50": 6, "p75": 12}
+        }
+
         self.enabled = self.url != "https://placeholder.supabase.co" and self.key != "placeholder"
         if self.enabled:
             try:
@@ -20,26 +42,6 @@ class DatabaseService:
         if not self.enabled:
             print("Supabase config not provided or failed. Running in mock database mode.")
             self.client = None
-            self.mock_runs = {}
-            self.mock_metrics = {}
-            self.mock_results = {}
-            # Prepopulate mock benchmarks
-            self.mock_benchmarks = {
-                ('Manufacturing', 'revenue_per_employee'): {"p25": 120000, "p50": 175000, "p75": 240000},
-                ('Manufacturing', 'output_per_payroll'): {"p25": 3.5, "p50": 4.2, "p75": 5.1},
-                ('Manufacturing', 'gross_margin'): {"p25": 25, "p50": 35, "p75": 45},
-                ('Manufacturing', 'operating_margin'): {"p25": 5, "p50": 12, "p75": 20},
-                
-                ('Services', 'revenue_per_employee'): {"p25": 100000, "p50": 145000, "p75": 210000},
-                ('Services', 'output_per_payroll'): {"p25": 2.8, "p50": 3.8, "p75": 4.9},
-                ('Services', 'gross_margin'): {"p25": 40, "p50": 55, "p75": 70},
-                ('Services', 'operating_margin'): {"p25": 8, "p50": 18, "p75": 28},
-                
-                ('Retail', 'revenue_per_employee'): {"p25": 150000, "p50": 190000, "p75": 250000},
-                ('Retail', 'output_per_payroll'): {"p25": 4.2, "p50": 5.3, "p75": 6.5},
-                ('Retail', 'gross_margin'): {"p25": 20, "p50": 28, "p75": 38},
-                ('Retail', 'operating_margin'): {"p25": 2, "p50": 6, "p75": 12}
-            }
 
     # Ingestion runs
     async def create_ingestion_run(self, sector: str, company_name: str, 
