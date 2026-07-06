@@ -21,7 +21,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-API_BASE_URL = "http://localhost:8000"
+import os
+API_BASE_URL = os.getenv("API_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000"))
 
 # ── Session State Initialisation ──────────────────────────────
 if "page" not in st.session_state:
