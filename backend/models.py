@@ -8,18 +8,15 @@ Design principles (MSc spec):
 - Digital Maturity is separate from the composite index (research design requirement).
 """
 
-from __future__ import annotations
-
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-from uuid import UUID
+from typing import Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
+from pydantic import BaseModel, ConfigDict, Field
 
 # ─────────────────────────────────────────────────────────────
 # Extraction layer schemas
 # ─────────────────────────────────────────────────────────────
+
 
 class ExtractionResult(BaseModel):
     """Result of extracting a single named metric from a document chunk."""
@@ -27,10 +24,10 @@ class ExtractionResult(BaseModel):
     model_config = ConfigDict(strict=True)
 
     metric_name: str
-    value: Optional[float]           # None means the metric was not found
+    value: Optional[float]  # None means the metric was not found
     unit: str = ""
     confidence: float = Field(ge=0.0, le=1.0, default=0.0)
-    source_passage: str = ""         # verbatim chunk text that produced this value
+    source_passage: str = ""  # verbatim chunk text that produced this value
 
 
 class ConflictWarning(BaseModel):
@@ -43,7 +40,7 @@ class ConflictWarning(BaseModel):
     value_b: float
     passage_a: str
     passage_b: str
-    discrepancy_pct: float           # absolute percentage difference
+    discrepancy_pct: float  # absolute percentage difference
 
 
 class ExtractionError(BaseModel):
@@ -60,6 +57,7 @@ class ExtractionError(BaseModel):
 # Raw metrics (legacy — kept for scoring engine input)
 # ─────────────────────────────────────────────────────────────
 
+
 class ExtractedMetrics(BaseModel):
     """
     Flat collection of all extracted numeric values, after conflict resolution.
@@ -70,8 +68,8 @@ class ExtractedMetrics(BaseModel):
     headcount: Optional[int] = None
     cogs: Optional[float] = None
     payroll: Optional[float] = None
-    gross_margin: Optional[float] = None          # percentage, 0–100
-    operating_margin: Optional[float] = None      # percentage, 0–100
+    gross_margin: Optional[float] = None  # percentage, 0–100
+    operating_margin: Optional[float] = None  # percentage, 0–100
     current_assets: Optional[float] = None
     current_liabilities: Optional[float] = None
     inventory: Optional[float] = None
@@ -89,12 +87,13 @@ class ExtractedMetrics(BaseModel):
 # Scoring output schemas
 # ─────────────────────────────────────────────────────────────
 
+
 class MetricScore(BaseModel):
     """Normalised score for a single metric within a pillar."""
 
     metric_name: str
     raw_value: Optional[float]
-    normalised_score: Optional[float]   # 0–100, None if excluded
+    normalised_score: Optional[float]  # 0–100, None if excluded
     p25: float
     p50: float
     p75: float
@@ -112,7 +111,7 @@ class PillarResult(BaseModel):
 
     pillar_name: str
     score: float = Field(ge=0.0, le=100.0)
-    confidence: float = Field(ge=0.0, le=100.0)   # % of metrics that were included
+    confidence: float = Field(ge=0.0, le=100.0)  # % of metrics that were included
     metrics: List[MetricScore] = Field(default_factory=list)
     excluded_metrics: List[str] = Field(default_factory=list)
     exclusion_reasons: Dict[str, str] = Field(default_factory=dict)
@@ -122,9 +121,9 @@ class Recommendation(BaseModel):
     """A ranked recommendation with traceability to source passage(s)."""
 
     rank: int
-    priority: str                    # "High" | "Medium" | "Low"
+    priority: str  # "High" | "Medium" | "Low"
     text: str
-    pillar: str                      # which pillar triggered this
+    pillar: str  # which pillar triggered this
     source_passages: List[str] = Field(default_factory=list)
 
 
@@ -135,7 +134,7 @@ class DigitalMaturityResult(BaseModel):
     """
 
     score: float = Field(ge=0.0, le=100.0)
-    level: str                        # "Low" | "Medium" | "High"
+    level: str  # "Low" | "Medium" | "High"
     tools_identified: List[str] = Field(default_factory=list)
     automation_detected: bool = False
     process_indicators: List[str] = Field(default_factory=list)
@@ -146,12 +145,13 @@ class DigitalMaturityResult(BaseModel):
 # API request / response schemas
 # ─────────────────────────────────────────────────────────────
 
+
 class AssessmentRequest(BaseModel):
     """Form fields accompanying file upload (validated by FastAPI)."""
 
     company_name: str = "Unknown"
-    sector: str                       # "Retail" | "Services" | "Manufacturing"
-    document_type: str = "PDF"        # "PDF" | "CSV"
+    sector: str  # "Retail" | "Services" | "Manufacturing"
+    document_type: str = "PDF"  # "PDF" | "CSV"
 
 
 class AssessmentOutput(BaseModel):
@@ -191,7 +191,7 @@ class AssessmentOutput(BaseModel):
 class AssessmentResponse(BaseModel):
     """Envelope for the /assess endpoint JSON response."""
 
-    status: str                       # "success" | "error"
+    status: str  # "success" | "error"
     message: str
     result: Optional[AssessmentOutput] = None
     error: Optional[str] = None
@@ -200,6 +200,7 @@ class AssessmentResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # Auth schemas (preserved from existing prototype — out of spec scope)
 # ─────────────────────────────────────────────────────────────
+
 
 class UserSignup(BaseModel):
     email: str
@@ -217,6 +218,7 @@ class UserLogin(BaseModel):
 # Strict LLM response schema (used for Pydantic validation of Groq output)
 # ─────────────────────────────────────────────────────────────
 
+
 class LLMMetricResponse(BaseModel):
     """
     Expected JSON structure returned by Groq for a single metric extraction call.
@@ -230,4 +232,4 @@ class LLMMetricResponse(BaseModel):
     value: Optional[float]
     unit: str = ""
     confidence: float = Field(ge=0.0, le=1.0)
-    source_quote: str = ""           # exact verbatim quote from the retrieved passage
+    source_quote: str = ""  # exact verbatim quote from the retrieved passage

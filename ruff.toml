@@ -1,0 +1,27 @@
+# Ruff configuration for Vantly / SME Assessment Platform
+
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+
+ignore = [
+  "E501",   # line too long — handled by formatter
+  "E402",   # module-level import not at top — intentional (load_dotenv() before imports)
+  "B008",   # function calls in default args — FastAPI Depends() pattern
+  "B904",   # raise from None — intentional in error handlers
+  "UP007",  # Use X | Y for Union — Python 3.9 compat
+  "UP017",  # Use datetime.UTC alias — only available in Python 3.11+
+  "UP006",  # Use type instead of Type — Python 3.9 compat
+  "UP035",  # typing.List/Dict/Tuple deprecated — kept for Python 3.9 compat
+  "UP045",  # Use X | None — not valid in Python 3.9 Pydantic models
+]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["B", "E711"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

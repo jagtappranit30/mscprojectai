@@ -12,10 +12,10 @@ Design principles (MSc spec):
 
 from __future__ import annotations
 
-import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
-from ..utils.config import settings
+import numpy as np
+
 from ..utils.database import db_service
 
 # FastEmbed correct class name for text embedding models
@@ -36,8 +36,10 @@ class RAGService:
         self.mock_chunks: Dict[str, List[Tuple[str, List[float]]]] = {}
 
         try:
-            from fastembed import TextEmbedding  # type: ignore
             import os
+
+            from fastembed import TextEmbedding  # type: ignore
+
             self.embedding_model = TextEmbedding(
                 model_name=_FASTEMBED_MODEL,
                 cache_dir=os.getenv("FASTEMBED_CACHE_PATH", "/tmp/fastembed_cache"),
@@ -45,10 +47,7 @@ class RAGService:
             self.enabled = True
             print(f"FastEmbed initialised: {_FASTEMBED_MODEL}")
         except Exception as exc:
-            print(
-                f"FastEmbed init failed: {exc}. "
-                "RAG running in local-cosine fallback mode."
-            )
+            print(f"FastEmbed init failed: {exc}. RAG running in local-cosine fallback mode.")
 
     # ──────────────────────────────────────────────────────────
     async def chunk_text(
@@ -121,7 +120,7 @@ class RAGService:
                         "embedding": emb,
                         "source_filename": source_filename,
                     }
-                    for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+                    for i, (chunk, emb) in enumerate(zip(chunks, embeddings, strict=False))
                 ]
                 db_service.client.table("document_chunks").insert(rows).execute()
                 return
@@ -130,7 +129,7 @@ class RAGService:
 
         # Local fallback cache
         existing = self.mock_chunks.get(run_id, [])
-        existing.extend(zip(chunks, embeddings))
+        existing.extend(zip(chunks, embeddings, strict=False))
         self.mock_chunks[run_id] = existing
 
     # ──────────────────────────────────────────────────────────

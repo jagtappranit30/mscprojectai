@@ -1,6 +1,8 @@
 import os
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
     GROQ_API_KEY: str
@@ -16,8 +18,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"),
         env_file_encoding="utf-8",
-        extra="ignore"
+        extra="ignore",
     )
+
 
 # Instantiate settings
 try:
@@ -33,4 +36,5 @@ except Exception:
         DEBUG = os.getenv("DEBUG", "true").lower() == "true"
         APP_NAME = os.getenv("APP_NAME", "SME Productivity Assessment Platform")
         RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000")
+
     settings = FallbackSettings()

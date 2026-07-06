@@ -27,7 +27,6 @@ from ..models import (
     LLMMetricResponse,
 )
 from ..utils.config import settings
-from ..utils.database import db_service
 
 # ──────────────────────────────────────────────────────────────
 # Metrics the pipeline must attempt to extract
@@ -184,6 +183,7 @@ class ExtractionService:
         if self.enabled:
             try:
                 from groq import Groq  # type: ignore
+
                 self.client = Groq(api_key=api_key)
                 print("Groq extraction service initialised.")
             except Exception as exc:
@@ -196,7 +196,7 @@ class ExtractionService:
         response = self.client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,   # deterministic extraction
+            temperature=0.0,  # deterministic extraction
             max_tokens=300,
         )
         return response.choices[0].message.content.strip()
@@ -204,6 +204,7 @@ class ExtractionService:
     async def _call_groq_async(self, prompt: str) -> str:
         """Non-blocking wrapper around _call_groq using asyncio.to_thread."""
         import asyncio
+
         return await asyncio.to_thread(self._call_groq, prompt)
 
     # ──────────────────────────────────────────────────────────
@@ -294,9 +295,7 @@ class ExtractionService:
 
         async def _retrieve_one(metric_name: str, query: str) -> Tuple[str, List[str]]:
             try:
-                results = await rag_service.retrieve_context(
-                    query=query, run_id=run_id, top_k=5
-                )
+                results = await rag_service.retrieve_context(query=query, run_id=run_id, top_k=5)
                 return metric_name, results
             except Exception as exc:
                 print(f"RAG retrieval failed for {metric_name}: {exc}")
@@ -313,24 +312,36 @@ class ExtractionService:
             retrieved = retrieved_map.get(metric_name, [])
 
             if not retrieved:
-                return metric_name, ExtractionResult(
-                    metric_name=metric_name, value=None, confidence=0.0, source_passage=""
-                ), None
+                return (
+                    metric_name,
+                    ExtractionResult(
+                        metric_name=metric_name, value=None, confidence=0.0, source_passage=""
+                    ),
+                    None,
+                )
 
             if not self.enabled:
-                return metric_name, ExtractionResult(
-                    metric_name=metric_name, value=None, confidence=0.0, source_passage=""
-                ), None
+                return (
+                    metric_name,
+                    ExtractionResult(
+                        metric_name=metric_name, value=None, confidence=0.0, source_passage=""
+                    ),
+                    None,
+                )
 
             prompt = _build_extraction_prompt(metric_name, unit_hint, retrieved)
 
             try:
                 raw_response = await self._call_groq_async(prompt)
             except Exception as exc:
-                return metric_name, None, ExtractionError(
-                    metric_name=metric_name,
-                    raw_response="",
-                    error_detail=f"Groq API error: {exc}",
+                return (
+                    metric_name,
+                    None,
+                    ExtractionError(
+                        metric_name=metric_name,
+                        raw_response="",
+                        error_detail=f"Groq API error: {exc}",
+                    ),
                 )
 
             result, error = self._parse_llm_response(metric_name, raw_response, retrieved)
@@ -350,21 +361,19 @@ class ExtractionService:
             # Conflict detection (unlikely with parallel calls, but preserved for correctness)
             if metric_name in extraction_results:
                 existing = extraction_results[metric_name]
-                if (
-                    existing.value is not None
-                    and result.value is not None
-                    and existing.value != 0
-                ):
+                if existing.value is not None and result.value is not None and existing.value != 0:
                     discrepancy = abs(result.value - existing.value) / abs(existing.value) * 100
                     if discrepancy > 10.0:
-                        conflict_warnings.append(ConflictWarning(
-                            metric_name=metric_name,
-                            value_a=existing.value,
-                            value_b=result.value,
-                            passage_a=existing.source_passage,
-                            passage_b=result.source_passage,
-                            discrepancy_pct=discrepancy,
-                        ))
+                        conflict_warnings.append(
+                            ConflictWarning(
+                                metric_name=metric_name,
+                                value_a=existing.value,
+                                value_b=result.value,
+                                passage_a=existing.source_passage,
+                                passage_b=result.source_passage,
+                                discrepancy_pct=discrepancy,
+                            )
+                        )
                         continue
 
             extraction_results[metric_name] = result
@@ -372,9 +381,11 @@ class ExtractionService:
                 source_passages[metric_name] = result.source_passage
 
         # ── Digital maturity extraction (concurrent with nothing, runs separately) ──
-        digital_tools, automation_detected, process_indicators = (
-            await self._extract_digital_indicators(run_id, rag_service)
-        )
+        (
+            digital_tools,
+            automation_detected,
+            process_indicators,
+        ) = await self._extract_digital_indicators(run_id, rag_service)
 
         # ── Assemble ExtractedMetrics ─────────────────────────
         def _val(name: str) -> Optional[float]:
@@ -386,12 +397,10 @@ class ExtractionService:
             return int(round(v)) if v is not None else None
 
         found_confidences = [
-            r.confidence for r in extraction_results.values()
-            if r.value is not None
+            r.confidence for r in extraction_results.values() if r.value is not None
         ]
         overall_confidence = (
-            sum(found_confidences) / len(found_confidences)
-            if found_confidences else 0.0
+            sum(found_confidences) / len(found_confidences) if found_confidences else 0.0
         )
 
         metrics = ExtractedMetrics(
@@ -436,23 +445,26 @@ class ExtractionService:
         sanitised = sanitise_content(combined_text)
 
         # Tool detection
-        found_tools = [
-            tool.title() for tool in KNOWN_DIGITAL_TOOLS
-            if tool.lower() in sanitised
-        ]
+        found_tools = [tool.title() for tool in KNOWN_DIGITAL_TOOLS if tool.lower() in sanitised]
 
         # Automation language detection
         automation_detected = any(kw in sanitised for kw in AUTOMATION_KEYWORDS)
 
         # Digital process indicator phrases
         indicator_patterns = [
-            "electronic invoic", "e-invoic", "cloud-based", "online platform",
-            "digital workflow", "automated report", "api integrat",
-            "paperless", "mobile app", "real-time dashboard", "data analytics",
+            "electronic invoic",
+            "e-invoic",
+            "cloud-based",
+            "online platform",
+            "digital workflow",
+            "automated report",
+            "api integrat",
+            "paperless",
+            "mobile app",
+            "real-time dashboard",
+            "data analytics",
         ]
-        process_indicators = [
-            phrase for phrase in indicator_patterns if phrase in sanitised
-        ]
+        process_indicators = [phrase for phrase in indicator_patterns if phrase in sanitised]
 
         return found_tools, automation_detected, process_indicators
 
@@ -460,6 +472,7 @@ class ExtractionService:
 # ──────────────────────────────────────────────────────────────
 # Module-level factory
 # ──────────────────────────────────────────────────────────────
+
 
 def get_extraction_service() -> ExtractionService:
     return ExtractionService(api_key=settings.GROQ_API_KEY)

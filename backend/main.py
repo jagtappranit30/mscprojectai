@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 from uuid import uuid4
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -46,7 +46,6 @@ from .services.extraction import get_extraction_service
 from .services.pdf_generator import generate_assessment_report
 from .services.rag import rag_service
 from .services.scoring import ScoringService
-from .utils.config import settings
 from .utils.database import db_service
 
 # ── Auth configuration (out of spec scope — preserved) ────────
@@ -75,6 +74,7 @@ app.add_middleware(
 
 
 # ── Document parsing helpers ───────────────────────────────────
+
 
 async def _parse_pdf(file: UploadFile) -> str:
     """Extract plain text from a PDF using PyMuPDF."""
@@ -111,6 +111,7 @@ async def _extract_text(file: UploadFile) -> str:
 
 # ── Main assessment endpoint ───────────────────────────────────
 
+
 @app.post("/assess", response_model=AssessmentResponse)
 async def assess_productivity(
     files: List[UploadFile] = File(...),
@@ -125,7 +126,7 @@ async def assess_productivity(
       - company_name: optional company name string
       - sector:       required — "Retail" | "Services" | "Manufacturing"
     """
-    run_id: str | None = None
+    run_id: Optional[str] = None
     pipeline_stages: dict = {}
 
     try:
@@ -133,9 +134,9 @@ async def assess_productivity(
         run_id = await db_service.create_ingestion_run(
             sector=sector,
             company_name=company_name,
-            document_type="MIXED" if len(files) > 1 else (
-                "PDF" if (files[0].filename or "").endswith(".pdf") else "CSV"
-            ),
+            document_type="MIXED"
+            if len(files) > 1
+            else ("PDF" if (files[0].filename or "").endswith(".pdf") else "CSV"),
         )
 
         # ── Stage 1: Parsing ───────────────────────────────────
@@ -155,7 +156,8 @@ async def assess_productivity(
 
         if not all_text_parts:
             await db_service.update_run_status(
-                run_id, "failed",
+                run_id,
+                "failed",
                 error_message="All uploaded documents appear empty or unreadable",
             )
             return JSONResponse(
@@ -180,28 +182,44 @@ async def assess_productivity(
         pipeline_stages["retrieving"] = "running"
         pipeline_stages["extracting"] = "running"
         extraction_service = get_extraction_service()
-        metrics, conflict_warnings, extraction_errors, source_passages = (
-            await extraction_service.extract_all_metrics(run_id, rag_service)
-        )
+        (
+            metrics,
+            conflict_warnings,
+            extraction_errors,
+            source_passages,
+        ) = await extraction_service.extract_all_metrics(run_id, rag_service)
         pipeline_stages["retrieving"] = "complete"
         pipeline_stages["extracting"] = "complete"
 
         # Store extracted metrics in DB
         metrics_dict = {
-            name: {"value": getattr(metrics, name, None), "unit": "£", "confidence": metrics.confidence}
-            for name in ["revenue", "headcount", "payroll", "gross_margin",
-                         "operating_margin", "current_assets", "current_liabilities", "inventory"]
+            name: {
+                "value": getattr(metrics, name, None),
+                "unit": "£",
+                "confidence": metrics.confidence,
+            }
+            for name in [
+                "revenue",
+                "headcount",
+                "payroll",
+                "gross_margin",
+                "operating_margin",
+                "current_assets",
+                "current_liabilities",
+                "inventory",
+            ]
             if getattr(metrics, name, None) is not None
         }
         await db_service.store_extracted_metrics(run_id, metrics_dict)
 
         # ── Stage 6: Scoring ───────────────────────────────────
         pipeline_stages["scoring"] = "running"
-        labour_pillar, financial_pillar, composite_index, digital_maturity = (
-            await ScoringService.calculate_productivity_index(
-                metrics, sector, source_passages
-            )
-        )
+        (
+            labour_pillar,
+            financial_pillar,
+            composite_index,
+            digital_maturity,
+        ) = await ScoringService.calculate_productivity_index(metrics, sector, source_passages)
 
         recommendations = ScoringService.generate_recommendations(
             labour_pillar, financial_pillar, composite_index, sector, source_passages
@@ -210,16 +228,18 @@ async def assess_productivity(
 
         # ── Store result ───────────────────────────────────────
         result_id = str(uuid4())
-        await db_service.store_assessment_result({
-            "result_id": result_id,
-            "run_id": run_id,
-            "labour_efficiency_score": labour_pillar.score,
-            "financial_health_score": financial_pillar.score,
-            "productivity_index": composite_index,
-            "digital_maturity_score": digital_maturity.score,
-            "confidence_overall": metrics.confidence * 100,
-            "recommendations": "; ".join(r.text for r in recommendations),
-        })
+        await db_service.store_assessment_result(
+            {
+                "result_id": result_id,
+                "run_id": run_id,
+                "labour_efficiency_score": labour_pillar.score,
+                "financial_health_score": financial_pillar.score,
+                "productivity_index": composite_index,
+                "digital_maturity_score": digital_maturity.score,
+                "confidence_overall": metrics.confidence * 100,
+                "recommendations": "; ".join(r.text for r in recommendations),
+            }
+        )
         await db_service.update_run_status(run_id, "complete", metrics.confidence * 100)
 
         # ── Build response ─────────────────────────────────────
@@ -250,6 +270,7 @@ async def assess_productivity(
 
     except Exception as exc:
         import traceback
+
         traceback.print_exc()
         if run_id:
             await db_service.update_run_status(run_id, "failed", error_message=str(exc))
@@ -261,12 +282,14 @@ async def assess_productivity(
 
 # ── Health check ───────────────────────────────────────────────
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
 
 
 # ── Auth endpoints (out of spec scope — preserved) ────────────
+
 
 @app.post("/signup")
 async def signup(user: UserSignup):
@@ -307,7 +330,9 @@ async def save_assessment(result_id: str, user_id: str = Form(...)):
 @app.get("/reports/{run_id}/pdf")
 async def get_pdf_report(run_id: str):
     if db_service.enabled:
-        res = db_service.client.table("assessment_results").select("*").eq("run_id", run_id).execute()
+        res = (
+            db_service.client.table("assessment_results").select("*").eq("run_id", run_id).execute()
+        )
         if not res.data:
             raise HTTPException(status_code=404, detail="Report not found")
         result_data = res.data[0]
@@ -324,9 +349,12 @@ async def get_pdf_report(run_id: str):
             raise HTTPException(status_code=404, detail="Report not found")
 
     file_path = generate_assessment_report(result_data)
-    return FileResponse(file_path, filename=f"Assessment_{run_id}.pdf", media_type="application/pdf")
+    return FileResponse(
+        file_path, filename=f"Assessment_{run_id}.pdf", media_type="application/pdf"
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

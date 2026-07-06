@@ -14,8 +14,9 @@ Design principles (MSc spec):
 
 from __future__ import annotations
 
-import numpy as np
 from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 from ..models import (
     DigitalMaturityResult,
@@ -26,23 +27,49 @@ from ..models import (
 )
 from ..utils.database import db_service
 
-
 # ──────────────────────────────────────────────────────────────
 # Known software tools for Digital Maturity rubric
 # (extracted from document text by the extraction service and passed in)
 # ──────────────────────────────────────────────────────────────
 KNOWN_DIGITAL_TOOLS: List[str] = [
-    "xero", "quickbooks", "sage", "sap", "oracle", "netsuite",
-    "salesforce", "hubspot", "dynamics", "zoho",
-    "monday.com", "asana", "trello", "jira", "slack", "teams",
-    "shopify", "woocommerce", "magento",
-    "excel", "google sheets", "power bi", "tableau",
-    "zapier", "make", "n8n",
+    "xero",
+    "quickbooks",
+    "sage",
+    "sap",
+    "oracle",
+    "netsuite",
+    "salesforce",
+    "hubspot",
+    "dynamics",
+    "zoho",
+    "monday.com",
+    "asana",
+    "trello",
+    "jira",
+    "slack",
+    "teams",
+    "shopify",
+    "woocommerce",
+    "magento",
+    "excel",
+    "google sheets",
+    "power bi",
+    "tableau",
+    "zapier",
+    "make",
+    "n8n",
 ]
 
 AUTOMATION_KEYWORDS: List[str] = [
-    "automat", "workflow", "robotic process", "rpa", "bot",
-    "digital transform", "paperless", "e-invoic", "api integrat",
+    "automat",
+    "workflow",
+    "robotic process",
+    "rpa",
+    "bot",
+    "digital transform",
+    "paperless",
+    "e-invoic",
+    "api integrat",
 ]
 
 
@@ -134,8 +161,8 @@ def _pillar_from_metrics(
 # Public API
 # ──────────────────────────────────────────────────────────────
 
-class ScoringService:
 
+class ScoringService:
     @staticmethod
     async def calculate_productivity_index(
         metrics: ExtractedMetrics,
@@ -187,13 +214,15 @@ class ScoringService:
         )
         current_ratio: Optional[float] = (
             current_assets / current_liabilities
-            if current_assets is not None and current_liabilities is not None
+            if current_assets is not None
+            and current_liabilities is not None
             and current_liabilities > 0
             else None
         )
         quick_ratio: Optional[float] = (
             (current_assets - (inventory or 0.0)) / current_liabilities
-            if current_assets is not None and current_liabilities is not None
+            if current_assets is not None
+            and current_liabilities is not None
             and current_liabilities > 0
             else None
         )
@@ -204,10 +233,10 @@ class ScoringService:
 
         b_rev_emp = await bench("revenue_per_employee")
         b_payroll = await bench("output_per_payroll")
-        b_hc_eff  = await bench("headcount_efficiency_ratio")
-        b_gross   = await bench("gross_margin")
-        b_op      = await bench("operating_margin")
-        b_cur_r   = await bench("current_ratio")
+        b_hc_eff = await bench("headcount_efficiency_ratio")
+        b_gross = await bench("gross_margin")
+        b_op = await bench("operating_margin")
+        b_cur_r = await bench("current_ratio")
         b_quick_r = await bench("quick_ratio")
 
         # ── Labour Efficiency pillar ──────────────────────────
@@ -332,35 +361,47 @@ class ScoringService:
         labour_passage = passages.get("revenue_per_employee", passages.get("revenue", ""))
 
         if labour_score < 34:
-            recs.append(Recommendation(
-                rank=rank, priority="High", pillar="Labour Efficiency",
-                text=(
-                    "Revenue per employee is significantly below the sector p25 threshold. "
-                    "Investigate staff utilisation rates, automate repetitive manual workflows, "
-                    "and consider sales-enablement or upskilling programmes."
-                ),
-                source_passages=[labour_passage] if labour_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="High",
+                    pillar="Labour Efficiency",
+                    text=(
+                        "Revenue per employee is significantly below the sector p25 threshold. "
+                        "Investigate staff utilisation rates, automate repetitive manual workflows, "
+                        "and consider sales-enablement or upskilling programmes."
+                    ),
+                    source_passages=[labour_passage] if labour_passage else [],
+                )
+            )
         elif labour_score < 67:
-            recs.append(Recommendation(
-                rank=rank, priority="Medium", pillar="Labour Efficiency",
-                text=(
-                    "Labour efficiency is between sector p25 and p75. "
-                    "Explore workforce optimisation strategies, cross-train staff, "
-                    "and streamline operational tasks to increase output per employee."
-                ),
-                source_passages=[labour_passage] if labour_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="Medium",
+                    pillar="Labour Efficiency",
+                    text=(
+                        "Labour efficiency is between sector p25 and p75. "
+                        "Explore workforce optimisation strategies, cross-train staff, "
+                        "and streamline operational tasks to increase output per employee."
+                    ),
+                    source_passages=[labour_passage] if labour_passage else [],
+                )
+            )
         else:
-            recs.append(Recommendation(
-                rank=rank, priority="Low", pillar="Labour Efficiency",
-                text=(
-                    "Revenue per employee is above sector p75 — strong performance. "
-                    "Maintain talent-retention schemes and scale by standardising "
-                    "the processes driving this efficiency."
-                ),
-                source_passages=[labour_passage] if labour_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="Low",
+                    pillar="Labour Efficiency",
+                    text=(
+                        "Revenue per employee is above sector p75 — strong performance. "
+                        "Maintain talent-retention schemes and scale by standardising "
+                        "the processes driving this efficiency."
+                    ),
+                    source_passages=[labour_passage] if labour_passage else [],
+                )
+            )
         rank += 1
 
         # ── Financial Health ──────────────────────────────────
@@ -368,68 +409,92 @@ class ScoringService:
         fin_passage = passages.get("gross_margin", passages.get("operating_margin", ""))
 
         if financial_score < 34:
-            recs.append(Recommendation(
-                rank=rank, priority="High", pillar="Financial Health",
-                text=(
-                    "Financial health metrics are below sector p25. "
-                    "Review supplier contracts to reduce COGS, renegotiate overheads, "
-                    "and improve debtor collection cycles to shore up liquidity."
-                ),
-                source_passages=[fin_passage] if fin_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="High",
+                    pillar="Financial Health",
+                    text=(
+                        "Financial health metrics are below sector p25. "
+                        "Review supplier contracts to reduce COGS, renegotiate overheads, "
+                        "and improve debtor collection cycles to shore up liquidity."
+                    ),
+                    source_passages=[fin_passage] if fin_passage else [],
+                )
+            )
         elif financial_score < 67:
-            recs.append(Recommendation(
-                rank=rank, priority="Medium", pillar="Financial Health",
-                text=(
-                    "Margins or liquidity ratios are at or near sector median. "
-                    "Review pricing strategy and optimise inventory levels "
-                    "to free working capital and push toward p75."
-                ),
-                source_passages=[fin_passage] if fin_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="Medium",
+                    pillar="Financial Health",
+                    text=(
+                        "Margins or liquidity ratios are at or near sector median. "
+                        "Review pricing strategy and optimise inventory levels "
+                        "to free working capital and push toward p75."
+                    ),
+                    source_passages=[fin_passage] if fin_passage else [],
+                )
+            )
         else:
-            recs.append(Recommendation(
-                rank=rank, priority="Low", pillar="Financial Health",
-                text=(
-                    "Profit margins and liquidity are above sector p75. "
-                    "Leverage this financial strength to invest in R&D, "
-                    "digital tools, or strategic expansion."
-                ),
-                source_passages=[fin_passage] if fin_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="Low",
+                    pillar="Financial Health",
+                    text=(
+                        "Profit margins and liquidity are above sector p75. "
+                        "Leverage this financial strength to invest in R&D, "
+                        "digital tools, or strategic expansion."
+                    ),
+                    source_passages=[fin_passage] if fin_passage else [],
+                )
+            )
         rank += 1
 
         # ── Overall composite ─────────────────────────────────
         overall_passage = labour_passage or fin_passage
         if composite < 34:
-            recs.append(Recommendation(
-                rank=rank, priority="High", pillar="Overall",
-                text=(
-                    "The composite productivity index is in the bottom third of the sector. "
-                    "Conduct a thorough internal process audit to identify bottlenecks "
-                    "and create a prioritised improvement roadmap."
-                ),
-                source_passages=[overall_passage] if overall_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="High",
+                    pillar="Overall",
+                    text=(
+                        "The composite productivity index is in the bottom third of the sector. "
+                        "Conduct a thorough internal process audit to identify bottlenecks "
+                        "and create a prioritised improvement roadmap."
+                    ),
+                    source_passages=[overall_passage] if overall_passage else [],
+                )
+            )
         elif composite < 67:
-            recs.append(Recommendation(
-                rank=rank, priority="Medium", pillar="Overall",
-                text=(
-                    "Productivity is around the sector median. "
-                    "Focus on continuous incremental improvements in your weakest pillar "
-                    "to transition into the top third."
-                ),
-                source_passages=[overall_passage] if overall_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="Medium",
+                    pillar="Overall",
+                    text=(
+                        "Productivity is around the sector median. "
+                        "Focus on continuous incremental improvements in your weakest pillar "
+                        "to transition into the top third."
+                    ),
+                    source_passages=[overall_passage] if overall_passage else [],
+                )
+            )
         else:
-            recs.append(Recommendation(
-                rank=rank, priority="Low", pillar="Overall",
-                text=(
-                    "High-productivity performer — above sector p75 on the composite index. "
-                    "Consider aggressive expansion, new geographies, or new product lines "
-                    "to sustain this competitive position."
-                ),
-                source_passages=[overall_passage] if overall_passage else [],
-            ))
+            recs.append(
+                Recommendation(
+                    rank=rank,
+                    priority="Low",
+                    pillar="Overall",
+                    text=(
+                        "High-productivity performer — above sector p75 on the composite index. "
+                        "Consider aggressive expansion, new geographies, or new product lines "
+                        "to sustain this competitive position."
+                    ),
+                    source_passages=[overall_passage] if overall_passage else [],
+                )
+            )
 
         return recs
