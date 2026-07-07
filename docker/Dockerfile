@@ -56,12 +56,6 @@ EXPOSE 8000 8501
 # Switch to non-root user
 USER appuser
 
-# Start both services in the same container.
-# FastAPI handles assessment logic; Streamlit serves the UI.
-CMD ["sh", "-c", \
-    "uvicorn backend.main:app --host 0.0.0.0 --port 8000 & \
-     streamlit run frontend/app.py \
-       --server.port=8501 \
-       --server.address=0.0.0.0 \
-       --server.headless=true \
-       --browser.gatherUsageStats=false"]
+# Start services: if $PORT is defined, only run uvicorn on $PORT (Render.com production deployment).
+# If $PORT is not defined, run both FastAPI backend (port 8000) and Streamlit UI (port 8501) for local development.
+CMD ["sh", "-c", "if [ -n \"$PORT\" ]; then uvicorn backend.main:app --host 0.0.0.0 --port \"$PORT\"; else uvicorn backend.main:app --host 0.0.0.0 --port 8000 & streamlit run frontend/app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false; fi"]

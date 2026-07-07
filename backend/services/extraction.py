@@ -194,7 +194,7 @@ class ExtractionService:
     def _call_groq(self, prompt: str) -> str:
         """Synchronous Groq API call. Returns raw response text."""
         response = self.client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,  # deterministic extraction
             max_tokens=300,
