@@ -154,9 +154,8 @@ class RAGService:
                     {
                         "run_id": run_id,
                         "chunk_index": i,
-                        "content": chunk,
+                        "chunk_text": chunk,
                         "embedding": emb,
-                        "source_filename": source_filename,
                     }
                     for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
                 ]

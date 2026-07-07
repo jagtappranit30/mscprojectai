@@ -263,24 +263,7 @@ def inject_custom_css() -> None:
       font-weight: 500;
     }
     
-    /* Nav Buttons Style */
-    .st-key-nav_btn_home button, 
-    .st-key-nav_btn_assess button, 
-    .st-key-nav_btn_meth button {
-      background-color: transparent !important;
-      border: none !important;
-      color: #9AA3B5 !important;
-      border-bottom: 2px solid transparent !important;
-      border-radius: 0px !important;
-      padding: 6px 12px !important;
-      font-weight: 500 !important;
-      font-size: 14px !important;
-    }
-    .st-key-nav_btn_home button:hover, 
-    .st-key-nav_btn_assess button:hover, 
-    .st-key-nav_btn_meth button:hover {
-      color: #F5F6FA !important;
-    }
+
     
     /* Primary buttons */
     .stButton button {
@@ -342,6 +325,29 @@ def inject_custom_css() -> None:
       height: 100px;
     }
     
+    /* Header Navigation Overrides */
+    div[data-testid="stHorizontalBlock"]:first-of-type button {
+      background-color: transparent !important;
+      border: none !important;
+      border-color: transparent !important;
+      box-shadow: none !important;
+      outline: none !important;
+      color: #9AA3B5 !important;
+      border-bottom: 2px solid transparent !important;
+      border-radius: 0px !important;
+      padding: 6px 12px !important;
+      font-weight: 500 !important;
+      font-size: 14px !important;
+    }
+    div[data-testid="stHorizontalBlock"]:first-of-type button:hover {
+      color: #F5F6FA !important;
+      background-color: transparent !important;
+      border: none !important;
+      border-color: transparent !important;
+      box-shadow: none !important;
+      outline: none !important;
+    }
+    
     /* Landing Elements */
     .landing-hero {
       text-align: center;
@@ -370,6 +376,7 @@ def inject_custom_css() -> None:
       max-width: 600px;
       margin: 0 auto 32px auto;
       line-height: 1.6;
+      text-align: center !important;
     }
     
     /* Social proof */
@@ -828,25 +835,28 @@ def inject_custom_css() -> None:
 def inject_active_nav_style() -> None:
     active_page = st.session_state.page
     if active_page in ["input", "results"]:
-        active_key = "nav_btn_assess"
+        child_index = 3
     elif active_page == "methodology":
-        active_key = "nav_btn_meth"
+        child_index = 5
     else:
-        active_key = "nav_btn_home"
+        child_index = 1
 
     st.markdown(f"""
     <style>
-    .st-key-{active_key} button {{
+    div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="column"]:nth-child({child_index}) button {{
+      border: none !important;
       border-bottom: 2px solid #6366F1 !important;
       color: #F5F6FA !important;
       font-weight: 600 !important;
+      box-shadow: none !important;
+      outline: none !important;
     }}
     </style>
     """, unsafe_allow_html=True)
 
 # ── Header / Navigation ────────────────────────────────────────
 def render_header() -> None:
-    col_logo, col_nav = st.columns([1, 1])
+    col_logo, col_nav, col_spacer = st.columns([1, 2, 1])
     with col_logo:
         st.markdown("""
         <div class="logo-container">
@@ -863,9 +873,9 @@ def render_header() -> None:
         with col_assess:
             if st.button("Assessment", key="nav_btn_assess", use_container_width=True):
                 if st.session_state.assessment_result:
-                    st.session_state.page = "results"
+                     st.session_state.page = "results"
                 else:
-                    st.session_state.page = "input"
+                     st.session_state.page = "input"
                 st.rerun()
         with col_meth:
             if st.button("Methodology", key="nav_btn_meth", use_container_width=True):

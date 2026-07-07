@@ -47,6 +47,7 @@ from .services.pdf_generator import generate_assessment_report
 from .services.rag import rag_service
 from .services.scoring import ScoringService
 from .utils.database import db_service
+from .services.document_parser import parse_document
 
 # ── Auth configuration (out of spec scope — preserved) ────────
 SECRET_KEY = os.getenv("SUPABASE_JWT_SECRET", "supersecretkey")
@@ -73,40 +74,7 @@ app.add_middleware(
 )
 
 
-# ── Document parsing helpers ───────────────────────────────────
-
-
-async def _parse_pdf(file: UploadFile) -> str:
-    """Extract plain text from a PDF using PyMuPDF."""
-    import fitz  # PyMuPDF
-
-    content = await file.read()
-    doc = fitz.open(stream=content, filetype="pdf")
-    text = "".join(page.get_text() for page in doc)
-    await file.seek(0)
-    return text
-
-
-async def _parse_csv(file: UploadFile) -> str:
-    """Convert CSV rows to plain text (one row per line, comma-joined)."""
-    import csv
-    import io
-
-    content = await file.read()
-    reader = csv.reader(io.StringIO(content.decode("utf-8", errors="ignore")))
-    text = "\n".join(", ".join(row) for row in reader)
-    await file.seek(0)
-    return text
-
-
-async def _extract_text(file: UploadFile) -> str:
-    """Dispatch to the correct parser based on file extension."""
-    name = (file.filename or "").lower()
-    if name.endswith(".pdf"):
-        return await _parse_pdf(file)
-    if name.endswith(".csv"):
-        return await _parse_csv(file)
-    raise ValueError(f"Unsupported file type: {file.filename}")
+# Universal Document Parser is imported and utilized inside endpoints.
 
 
 # ── Main assessment endpoint ───────────────────────────────────
@@ -144,10 +112,13 @@ async def assess_productivity(
         all_text_parts: List[str] = []
         for f in files:
             try:
-                text = await _extract_text(f)
-                if text and len(text.strip()) >= 20:
-                    all_text_parts.append(text)
-            except ValueError as exc:
+                file_bytes = await f.read()
+                parsed = parse_document(file_bytes, f.filename or "")
+                if not parsed.success:
+                    raise ValueError(parsed.error_message)
+                if parsed.raw_text:
+                    all_text_parts.append(parsed.raw_text)
+            except Exception as exc:
                 await db_service.update_run_status(run_id, "failed", error_message=str(exc))
                 return JSONResponse(
                     status_code=400,
@@ -340,7 +311,7 @@ async def get_pdf_report(run_id: str):
         if not res.data:
             raise HTTPException(status_code=404, detail="Report not found")
         result_data = res.data[0]
-        ing = db_service.client.table("ingestion_runs").select("*").eq("id", run_id).execute()
+        ing = db_service.client.table("ingestion_runs").select("*").eq("run_id", run_id).execute()
         if ing.data:
             result_data["company_name"] = ing.data[0].get("company_name")
             result_data["sector"] = ing.data[0].get("sector")

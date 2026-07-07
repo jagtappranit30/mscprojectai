@@ -26,3 +26,8 @@ requests==2.32.5
 passlib[bcrypt]==1.7.4
 pyjwt==2.13.0
 fpdf2==2.8.4
+markitdown[pdf,docx,xlsx]
+markitdown-mcp
+filetype==1.2.0
+pdfplumber==0.11.9
+chardet==5.2.0

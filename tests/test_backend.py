@@ -17,7 +17,7 @@ import csv
 import io
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Dict
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -50,6 +50,7 @@ client = TestClient(app)
 # ══════════════════════════════════════════════════════════════
 # SECTION 1 — Parsing tests
 # ══════════════════════════════════════════════════════════════
+
 
 class TestParsing:
     """Tests for PDF and CSV document parsing."""
@@ -136,6 +137,7 @@ class TestParsing:
 # SECTION 2 — Scoring engine tests
 # ══════════════════════════════════════════════════════════════
 
+
 class TestScoringEngine:
     """Tests for the deterministic scoring engine."""
 
@@ -144,13 +146,21 @@ class TestScoringEngine:
     def _mock_benchmark(sector: str, metric_name: str) -> Dict:
         """Return mock benchmark values matching the database seed data."""
         benchmarks = {
-            ("Manufacturing", "revenue_per_employee"):   {"p25": 120000, "p50": 175000, "p75": 240000},
-            ("Manufacturing", "output_per_payroll"):      {"p25": 3.5, "p50": 4.2, "p75": 5.1},
-            ("Manufacturing", "headcount_efficiency_ratio"): {"p25": 22000, "p50": 28000, "p75": 36000},
-            ("Manufacturing", "gross_margin"):            {"p25": 25, "p50": 35, "p75": 45},
-            ("Manufacturing", "operating_margin"):        {"p25": 5, "p50": 12, "p75": 20},
-            ("Manufacturing", "current_ratio"):           {"p25": 1.2, "p50": 1.8, "p75": 2.5},
-            ("Manufacturing", "quick_ratio"):             {"p25": 0.8, "p50": 1.2, "p75": 1.8},
+            ("Manufacturing", "revenue_per_employee"): {
+                "p25": 120000,
+                "p50": 175000,
+                "p75": 240000,
+            },
+            ("Manufacturing", "output_per_payroll"): {"p25": 3.5, "p50": 4.2, "p75": 5.1},
+            ("Manufacturing", "headcount_efficiency_ratio"): {
+                "p25": 22000,
+                "p50": 28000,
+                "p75": 36000,
+            },
+            ("Manufacturing", "gross_margin"): {"p25": 25, "p50": 35, "p75": 45},
+            ("Manufacturing", "operating_margin"): {"p25": 5, "p50": 12, "p75": 20},
+            ("Manufacturing", "current_ratio"): {"p25": 1.2, "p50": 1.8, "p75": 2.5},
+            ("Manufacturing", "quick_ratio"): {"p25": 0.8, "p50": 1.2, "p75": 1.8},
         }
         return benchmarks.get((sector, metric_name), {"p25": 0, "p50": 50, "p75": 100})
 
@@ -190,9 +200,12 @@ class TestScoringEngine:
             "backend.utils.database.db_service.get_benchmark",
             new=AsyncMock(side_effect=lambda s, m: self._mock_benchmark(s, m)),
         ):
-            labour, financial, composite, digital = (
-                await ScoringService.calculate_productivity_index(metrics, "Manufacturing")
-            )
+            (
+                labour,
+                financial,
+                composite,
+                digital,
+            ) = await ScoringService.calculate_productivity_index(metrics, "Manufacturing")
 
         assert 0.0 <= labour.score <= 100.0
         assert 0.0 <= financial.score <= 100.0
@@ -218,9 +231,9 @@ class TestScoringEngine:
         No imputation must occur.
         """
         metrics = ExtractedMetrics(
-            revenue=None,          # <-- missing
+            revenue=None,  # <-- missing
             headcount=10,
-            payroll=None,          # <-- missing
+            payroll=None,  # <-- missing
             gross_margin=35.0,
             operating_margin=10.0,
             current_assets=60_000,
@@ -233,9 +246,12 @@ class TestScoringEngine:
             "backend.utils.database.db_service.get_benchmark",
             new=AsyncMock(side_effect=lambda s, m: self._mock_benchmark(s, m)),
         ):
-            labour, financial, composite, digital = (
-                await ScoringService.calculate_productivity_index(metrics, "Manufacturing")
-            )
+            (
+                labour,
+                financial,
+                composite,
+                digital,
+            ) = await ScoringService.calculate_productivity_index(metrics, "Manufacturing")
 
         # All three labour metrics require revenue or payroll → all excluded
         assert labour.confidence < 100.0
@@ -258,7 +274,7 @@ class TestScoringEngine:
         cw = ConflictWarning(
             metric_name="revenue",
             value_a=500_000.0,
-            value_b=560_000.0,   # 12% discrepancy
+            value_b=560_000.0,  # 12% discrepancy
             passage_a="Total revenue: £500,000",
             passage_b="Annual turnover: £560,000",
             discrepancy_pct=12.0,
@@ -273,14 +289,15 @@ class TestScoringEngine:
     def test_no_conflict_warning_for_lte10pct_discrepancy(self):
         """Values within 10% of each other should NOT trigger a conflict warning."""
         value_a = 500_000.0
-        value_b = 548_000.0   # 9.6% discrepancy
+        value_b = 548_000.0  # 9.6% discrepancy
         discrepancy = abs(value_b - value_a) / abs(value_a) * 100
-        assert discrepancy <= 10.0   # should not trigger conflict
+        assert discrepancy <= 10.0  # should not trigger conflict
 
 
 # ══════════════════════════════════════════════════════════════
 # SECTION 3 — Pydantic schema tests
 # ══════════════════════════════════════════════════════════════
+
 
 class TestPydanticSchemas:
     """Validate LLMMetricResponse: accept valid, reject malformed."""
@@ -334,7 +351,7 @@ class TestPydanticSchemas:
             "metric_name": "revenue",
             "value": 500000.0,
             "unit": "£",
-            "confidence": 1.5,   # invalid: must be 0.0–1.0
+            "confidence": 1.5,  # invalid: must be 0.0–1.0
             "source_quote": "",
         }
         with pytest.raises(ValidationError):
@@ -348,7 +365,7 @@ class TestPydanticSchemas:
             "metric_name": "gross_margin",
             "value": 35.0,
             "unit": "%",
-            "confidence": "high",   # invalid type
+            "confidence": "high",  # invalid type
             "source_quote": "",
         }
         with pytest.raises(ValidationError):
@@ -360,7 +377,7 @@ class TestPydanticSchemas:
 
         data = {
             "metric_name": "revenue",
-            "value": "£500,000",   # invalid — must be float or null
+            "value": "£500,000",  # invalid — must be float or null
             "unit": "£",
             "confidence": 0.9,
             "source_quote": "",
@@ -373,8 +390,8 @@ class TestPydanticSchemas:
 # SECTION 4 — API tests
 # ══════════════════════════════════════════════════════════════
 
-class TestAPIEndpoints:
 
+class TestAPIEndpoints:
     def test_health_endpoint_returns_ok(self):
         """GET /health must return 200 with {status: ok}."""
         response = client.get("/health")
