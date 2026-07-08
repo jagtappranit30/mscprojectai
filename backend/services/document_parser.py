@@ -1,7 +1,9 @@
 import csv
 import io
 from typing import List, Optional
+# pyrefly: ignore [missing-import]
 import filetype
+# pyrefly: ignore [missing-import]
 import fitz  # PyMuPDF
 import pdfplumber
 from pydantic import BaseModel
@@ -218,17 +220,53 @@ def parse_csv(file_bytes: bytes) -> ParsedDocument:
     )
 
 
+from ..utils.logger import logger
+
+def format_table_as_markdown(table: List[List[Optional[str]]]) -> str:
+    """Converts a parsed pdfplumber table list into a clean Markdown table grid."""
+    if not table or not any(table):
+        return ""
+    
+    # Clean cells and filter out entirely empty rows
+    valid_rows = []
+    for row in table:
+        if row and any(cell is not None and str(cell).strip() != "" for cell in row):
+            valid_rows.append([str(cell).strip() if cell is not None else "" for cell in row])
+            
+    if not valid_rows:
+        return ""
+        
+    cols_count = max(len(row) for row in valid_rows)
+    for row in valid_rows:
+        if len(row) < cols_count:
+            row.extend([""] * (cols_count - len(row)))
+            
+    headers = valid_rows[0]
+    separator = ["---"] * cols_count
+    
+    markdown_rows = []
+    markdown_rows.append("| " + " | ".join(headers) + " |")
+    markdown_rows.append("| " + " | ".join(separator) + " |")
+    
+    for row in valid_rows[1:]:
+        markdown_rows.append("| " + " | ".join(row) + " |")
+        
+    return "\n\n" + "\n".join(markdown_rows) + "\n\n"
+
+
 def parse_pdf(file_bytes: bytes) -> ParsedDocument:
     """
     Parse PDF using PyMuPDF (fitz) and pdfplumber for table extraction, with max 20 pages limit,
-    page markers, and scanned image detection.
+    page markers, and scanned image detection. Converts tables to clean Markdown format.
     """
     warnings = []
+    logger.info("PDF parsing started.")
 
     # Open the document
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
     except Exception as exc:
+        logger.error(f"Failed to open PDF document: {exc}")
         return ParsedDocument(
             raw_text="",
             source_type="pdf",
@@ -240,10 +278,12 @@ def parse_pdf(file_bytes: bytes) -> ParsedDocument:
         )
 
     page_count = len(doc)
+    logger.debug(f"PDF page count: {page_count}")
     
     # Max page limit
     if page_count > 20:
         doc.close()
+        logger.warning(f"PDF exceeds page limit: {page_count} pages")
         return ParsedDocument(
             raw_text="",
             source_type="pdf",
@@ -264,17 +304,18 @@ def parse_pdf(file_bytes: bytes) -> ParsedDocument:
                 page_text = page.extract_text() or ""
                 tables = page.extract_tables()
                 if tables:
+                    logger.debug(f"Page {i + 1}: Found {len(tables)} tables.")
                     table_strings = []
                     table_strings.append("\n--- Extracted Tables ---")
                     for t in tables:
-                        for row in t:
-                            row_cells = [str(cell).strip() if cell is not None else "" for cell in row]
-                            table_strings.append(" | ".join(row_cells))
-                        table_strings.append("")  # empty space after table
+                        table_md = format_table_as_markdown(t)
+                        if table_md:
+                            table_strings.append(table_md)
                     page_text += "\n" + "\n".join(table_strings)
                 pages_text.append(f"--- Page {i + 1} ---\n{page_text}")
         raw_text = "\n\n".join(pages_text)
     except Exception as exc:
+        logger.warning(f"pdfplumber table extraction failed: {exc}. Falling back to PyMuPDF.")
         warnings.append(f"pdfplumber failed to extract tables: {exc}. Falling back to PyMuPDF.")
         pdf_plumber_failed = True
 
@@ -298,8 +339,10 @@ def parse_pdf(file_bytes: bytes) -> ParsedDocument:
         clean_text = clean_text.replace(f"--- Page {i + 1} ---", "")
     clean_text = clean_text.replace("--- Extracted Tables ---", "")
     char_count = len(clean_text.replace("\n", "").replace("\r", "").replace(" ", "").strip())
+    logger.debug(f"Clean character count extracted: {char_count}")
 
     if char_count < 20:
+        logger.warning("Scanned PDF detected - character count below threshold.")
         return ParsedDocument(
             raw_text="",
             source_type="pdf",
@@ -310,6 +353,7 @@ def parse_pdf(file_bytes: bytes) -> ParsedDocument:
             error_message="PDF appears to be a scanned image with no extractable text. Please upload a text-based PDF or CSV instead."
         )
 
+    logger.info("PDF parsing completed successfully.")
     return ParsedDocument(
         raw_text=raw_text,
         source_type="pdf",

@@ -1,0 +1,66 @@
+INFO:     Started server process [6077]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:53739 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53741 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53743 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53745 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53746 - "GET /health HTTP/1.1" 200 OK
+/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+FastEmbed initialised (lazy): BAAI/bge-small-en-v1.5
+Supabase store_embeddings error: {'message': "Could not find the 'content' column of 'document_chunks' in the schema cache", 'code': 'PGRST204', 'hint': None, 'details': None} — using local cache
+Groq extraction service initialised.
+Groq Rate Limit (429) encountered. Retrying in 34.42s (attempt 1/4)...
+Groq Rate Limit (429) encountered. Retrying in 34.23s (attempt 1/4)...
+FastEmbed unloaded from memory (GC triggered).
+INFO:     127.0.0.1:53747 - "POST /assess HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53793 - "GET /reports/0dcda094-d6cf-4065-b33e-749759d86e91/pdf HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/uvicorn/protocols/http/h11_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/uvicorn/middleware/proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/fastapi/applications.py", line 1138, in __call__
+    await super().__call__(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/applications.py", line 113, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/middleware/cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/fastapi/routing.py", line 121, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/fastapi/routing.py", line 107, in app
+    response = await f(request)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/fastapi/routing.py", line 426, in app
+    raw_response = await run_endpoint_function(
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/fastapi/routing.py", line 314, in run_endpoint_function
+    return await dependant.call(**values)
+  File "/Volumes/D /E Drive/NTU/MSC Project D/backend/main.py", line 343, in get_pdf_report
+    ing = db_service.client.table("ingestion_runs").select("*").eq("id", run_id).execute()
+  File "/Volumes/D /E Drive/NTU/MSC Project D/venv/lib/python3.9/site-packages/postgrest/_sync/request_builder.py", line 96, in execute
+    raise APIError(dict(json_obj))
+postgrest.exceptions.APIError: {'message': 'column ingestion_runs.id does not exist', 'code': '42703', 'hint': None, 'details': None}

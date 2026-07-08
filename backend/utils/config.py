@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     APP_NAME: str = "SME Productivity Assessment Platform"
     RENDER_EXTERNAL_URL: str = "http://localhost:8000"
+    
+    # LLM Settings
+    LLM_PROVIDER: str = "groq"
+    OLLAMA_BASE_URL: str = "http://localhost:11434/v1"
+    OLLAMA_MODEL: str = "qwen2.5:7b"
 
     # Support loading from .env in project root
     model_config = SettingsConfigDict(
@@ -36,5 +41,8 @@ except Exception:
         DEBUG = os.getenv("DEBUG", "true").lower() == "true"
         APP_NAME = os.getenv("APP_NAME", "SME Productivity Assessment Platform")
         RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000")
+        LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq")
+        OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
     settings = FallbackSettings()

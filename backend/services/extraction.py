@@ -121,16 +121,17 @@ def sanitise_content(text: str) -> str:
 
 _WORKED_EXAMPLE = """\
 EXAMPLE (for revenue metric):
-Input passage: "The company generated total revenues of £1,250,000 in the year ending March 2024."
+Input passage: "[Page: 3, Section: Profit and Loss] The company generated total revenues of £1,250,000 in the year ending March 2024."
 Expected JSON output:
 {
   "metric_name": "revenue",
   "value": 1250000.0,
   "unit": "£",
   "confidence": 0.95,
-  "source_quote": "total revenues of £1,250,000 in the year ending March 2024"
+  "source_quote": "total revenues of £1,250,000 in the year ending March 2024",
+  "page_number": "3"
 }
-If the metric is not present in the passage, set "value" to null and "confidence" to 0.0.
+If the metric is not present in the passage, set "value" to null, "confidence" to 0.0, "source_quote" to "", and "page_number" to "".
 """
 
 
@@ -149,19 +150,26 @@ def _build_extraction_prompt(
 
     return f"""You are a financial data extraction assistant. Your only task is to extract the value of the metric named below from the provided document passages.
 
+CRITICAL RULES:
+1. NEVER guess or estimate values.
+2. NEVER calculate values or perform arithmetic operations.
+3. If the metric is not explicitly present in the document, return "value": null.
+4. Return ONLY a single valid JSON object. No markdown, no comments, no explanation.
+5. Preserve exact numeric values, dates, percentages, and currencies. Negative values must remain negative.
+
 {_WORKED_EXAMPLE}
 
 METRIC TO EXTRACT: {metric_name}
 EXPECTED UNIT: {unit_hint}
 
-Return ONLY a single valid JSON object. No markdown fences, no explanation, no additional text.
-The JSON must conform exactly to this schema:
+Return ONLY a single valid JSON object conforming exactly to this schema:
 {{
   "metric_name": "<string>",
   "value": <number or null>,
   "unit": "<string>",
   "confidence": <float 0.0–1.0>,
-  "source_quote": "<exact verbatim quote from the passages below, or empty string>"
+  "source_quote": "<exact verbatim quote from the passages below, or empty string>",
+  "page_number": "<string or null>"
 }}
 
 <DOCUMENT>
@@ -173,122 +181,13 @@ JSON output:"""
 
 class ExtractionService:
     """
-    Per-metric RAG-backed extraction service using Groq Llama 3.3 70B.
+    Per-metric RAG-backed extraction service using interchangeable LLM client providers.
     """
 
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.enabled = bool(api_key) and api_key not in ("placeholder", "")
-        self.client = None
-        if self.enabled:
-            try:
-                from groq import Groq  # type: ignore
-
-                self.client = Groq(api_key=api_key)
-                print("Groq extraction service initialised.")
-            except Exception as exc:
-                print(f"Failed to initialise Groq client: {exc}")
-                self.enabled = False
-
-    # ──────────────────────────────────────────────────────────
-    def _call_groq(self, prompt: str) -> str:
-        """Synchronous Groq API call. Returns raw response text."""
-        response = self.client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,  # deterministic extraction
-            max_tokens=300,
-        )
-        return response.choices[0].message.content.strip()
-
-    async def _call_groq_async(self, prompt: str) -> str:
-        """
-        Non-blocking wrapper around _call_groq using asyncio.to_thread.
-        Includes a retry-on-rate-limit (429) loop with automatic backoff.
-        """
-        import asyncio
-        import re
-
-        for attempt in range(4):
-            try:
-                return await asyncio.to_thread(self._call_groq, prompt)
-            except Exception as exc:
-                is_rate_limit = False
-                if getattr(exc, "status_code", None) == 429:
-                    is_rate_limit = True
-                elif "429" in str(exc) or "rate limit" in str(exc).lower():
-                    is_rate_limit = True
-
-                if is_rate_limit and attempt < 3:
-                    # Default exponential wait
-                    wait_time = 4.0 * (2 ** attempt)
-                    # Try to parse the exact wait time required by Groq's error message
-                    # e.g. "Please try again in 33.675s."
-                    match = re.search(r"try again in ([\d\.]+)s", str(exc))
-                    if match:
-                        wait_time = float(match.group(1)) + 0.5  # Add a tiny safety buffer
-
-                    print(f"Groq Rate Limit (429) encountered. Retrying in {wait_time:.2f}s (attempt {attempt + 1}/4)...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise exc
-
-        raise RuntimeError("Failed to complete Groq call after retries")
-
-    # ──────────────────────────────────────────────────────────
-    def _parse_llm_response(
-        self,
-        metric_name: str,
-        raw_text: str,
-        source_passages: List[str],
-    ) -> Tuple[Optional[ExtractionResult], Optional[ExtractionError]]:
-        """
-        Parse and strictly validate the LLM JSON response.
-        Returns (ExtractionResult, None) on success.
-        Returns (None, ExtractionError) on any validation failure — no retry.
-        """
-        # Strip accidental markdown fences
-        clean = raw_text
-        if clean.startswith("```"):
-            parts = clean.split("```")
-            clean = parts[1].strip()
-            if clean.startswith("json"):
-                clean = clean[4:].strip()
-
-        # Extract the first JSON object if surrounded by noise
-        match = re.search(r"\{.*\}", clean, re.DOTALL)
-        if match:
-            clean = match.group(0)
-
-        try:
-            data = json.loads(clean)
-        except json.JSONDecodeError as exc:
-            return None, ExtractionError(
-                metric_name=metric_name,
-                raw_response=raw_text[:500],
-                error_detail=f"JSON parse error: {exc}",
-            )
-
-        try:
-            validated: LLMMetricResponse = LLMMetricResponse.model_validate(data)
-        except Exception as exc:
-            return None, ExtractionError(
-                metric_name=metric_name,
-                raw_response=raw_text[:500],
-                error_detail=f"Schema validation error: {exc}",
-            )
-
-        # Use the source_quote from the LLM if available, else use the first passage
-        source_passage = validated.source_quote or (source_passages[0] if source_passages else "")
-
-        result = ExtractionResult(
-            metric_name=metric_name,
-            value=validated.value,
-            unit=validated.unit,
-            confidence=validated.confidence,
-            source_passage=source_passage,
-        )
-        return result, None
+    def __init__(self, api_key: Optional[str] = None):
+        from ..llm import LLMClientFactory
+        self.client = LLMClientFactory.get_client()
+        self.enabled = True
 
     # ──────────────────────────────────────────────────────────
     async def extract_all_metrics(
@@ -297,8 +196,8 @@ class ExtractionService:
         rag_service,
     ) -> Tuple[ExtractedMetrics, List[ConflictWarning], List[ExtractionError], Dict[str, str]]:
         """
-        Run per-metric RAG retrieval + Groq extraction for all required metrics.
-        All Groq calls are dispatched concurrently via asyncio.gather for speed.
+        Run per-metric RAG retrieval + Groq/Ollama extraction for all required metrics.
+        All LLM calls are dispatched concurrently via asyncio.gather for speed.
 
         Returns
         -------
@@ -307,7 +206,37 @@ class ExtractionService:
         extraction_errors: List of structured errors for metrics that failed validation.
         source_passages:  Dict[metric_name → source passage text] for traceability.
         """
+        import os
+        if os.getenv("GROQ_MOCK_MODE") == "true":
+            # Preset realistic values for mock/dev mode
+            metrics = ExtractedMetrics(
+                revenue=1500000.0,
+                headcount=12,
+                payroll=300000.0,
+                gross_margin=60.0,
+                operating_margin=15.0,
+                current_assets=450000.0,
+                current_liabilities=150000.0,
+                inventory=50000.0,
+                digital_tools_mentioned=["Xero", "Salesforce", "Jira"],
+                automation_mentioned=True,
+                digital_process_indicators=["e-invoicing", "cloud-based"],
+                confidence=1.0,
+            )
+            source_passages = {
+                "revenue": "Revenue: 1500000",
+                "headcount": "headcount: 12",
+                "payroll": "payroll: 300000",
+                "gross_margin": "gross_margin: 600000",
+                "operating_margin": "operating_margin: 150000",
+                "current_assets": "current_assets: 450000",
+                "current_liabilities": "current_liabilities: 150000",
+                "inventory": "inventory: 50000",
+            }
+            return metrics, [], [], source_passages
+
         import asyncio
+        from ..utils.logger import logger
 
         extraction_results: Dict[str, ExtractionResult] = {}
         conflict_warnings: List[ConflictWarning] = []
@@ -323,35 +252,28 @@ class ExtractionService:
 
         async def _retrieve_one(metric_name: str, query: str) -> Tuple[str, List[str]]:
             try:
+                logger.info(f"Retrieving chunks for metric: {metric_name}")
                 results = await rag_service.retrieve_context(query=query, run_id=run_id, top_k=5)
                 return metric_name, results
             except Exception as exc:
-                print(f"RAG retrieval failed for {metric_name}: {exc}")
+                logger.error(f"RAG retrieval failed for {metric_name}: {exc}")
                 return metric_name, []
 
         retrieval_tasks = [_retrieve_one(m, q) for m, q, _ in numeric_metrics]
         retrieval_results = await asyncio.gather(*retrieval_tasks)
         retrieved_map: Dict[str, List[str]] = dict(retrieval_results)
 
-        # Semaphore of 2 limits concurrent Groq requests to avoid rate limit spikes (TPM)
+        # Semaphore of 2 limits concurrent requests to avoid rate limit spikes
         sem = asyncio.Semaphore(2)
 
-        # ── Step 2: Run all Groq calls concurrently ───────────
+        # ── Step 2: Run all LLM calls concurrently ───────────
         async def _extract_one(
             metric_name: str, unit_hint: str
         ) -> Tuple[str, Optional[ExtractionResult], Optional[ExtractionError]]:
             retrieved = retrieved_map.get(metric_name, [])
 
             if not retrieved:
-                return (
-                    metric_name,
-                    ExtractionResult(
-                        metric_name=metric_name, value=None, confidence=0.0, source_passage=""
-                    ),
-                    None,
-                )
-
-            if not self.enabled:
+                logger.warning(f"No context retrieved for metric: {metric_name}")
                 return (
                     metric_name,
                     ExtractionResult(
@@ -364,20 +286,70 @@ class ExtractionService:
 
             try:
                 async with sem:
-                    raw_response = await self._call_groq_async(prompt)
+                    logger.info(f"Extracting metric: {metric_name} using active LLM client...")
+                    parsed_dict = await self.client.extract(prompt)
             except Exception as exc:
+                logger.error(f"LLM extraction request failed for {metric_name}: {exc}")
                 return (
                     metric_name,
                     None,
                     ExtractionError(
                         metric_name=metric_name,
                         raw_response="",
-                        error_detail=f"Groq API error: {exc}",
+                        error_detail=f"LLM API error: {exc}",
                     ),
                 )
 
-            result, error = self._parse_llm_response(metric_name, raw_response, retrieved)
-            return metric_name, result, error
+            # Validate the response
+            try:
+                validated = LLMMetricResponse.model_validate(parsed_dict)
+            except Exception as exc:
+                # Validation / parsing failed. Try self-repair loop once.
+                logger.warning(f"Validation failed for {metric_name}: {exc}. Attempting JSON schema self-repair...")
+                
+                repair_prompt = f"""You returned a JSON response that did not conform to the schema:
+{str(parsed_dict)}
+
+Validation error: {exc}
+
+Please repair the response. Return ONLY a single valid JSON object matching this schema exactly:
+{{
+  "metric_name": "{metric_name}",
+  "value": <number or null>,
+  "unit": "{unit_hint}",
+  "confidence": <float 0.0–1.0>,
+  "source_quote": "<exact verbatim quote>",
+  "page_number": "<page number>"
+}}
+
+JSON output:"""
+                
+                try:
+                    async with sem:
+                        repaired_dict = await self.client.extract(repair_prompt)
+                    validated = LLMMetricResponse.model_validate(repaired_dict)
+                    logger.info(f"Successfully repaired JSON schema for {metric_name}.")
+                except Exception as repair_exc:
+                    logger.error(f"JSON self-repair failed for {metric_name}: {repair_exc}")
+                    return (
+                        metric_name,
+                        None,
+                        ExtractionError(
+                            metric_name=metric_name,
+                            raw_response=str(parsed_dict)[:500],
+                            error_detail=f"Validation failed after self-repair attempt: {exc}",
+                        ),
+                    )
+
+            source_passage = validated.source_quote or (retrieved[0] if retrieved else "")
+            result = ExtractionResult(
+                metric_name=metric_name,
+                value=validated.value,
+                unit=validated.unit,
+                confidence=validated.confidence,
+                source_passage=source_passage,
+            )
+            return metric_name, result, None
 
         groq_tasks = [_extract_one(m, u) for m, _, u in numeric_metrics]
         groq_results = await asyncio.gather(*groq_tasks)
@@ -390,7 +362,7 @@ class ExtractionService:
             if result is None:
                 continue
 
-            # Conflict detection (unlikely with parallel calls, but preserved for correctness)
+            # Conflict detection
             if metric_name in extraction_results:
                 existing = extraction_results[metric_name]
                 if existing.value is not None and result.value is not None and existing.value != 0:

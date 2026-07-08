@@ -1446,12 +1446,10 @@ def render_results_page() -> None:
                         if p:
                             p_esc = p.replace('"', '&quot;')
                             p_boxes.append(f'<div class="passage-box">Citation {i}: &ldquo;{p_esc}&rdquo;</div>')
-                    passages_html = f"""
-                    <details>
-                      <summary>View audit trails / cited source passages</summary>
-                      {"".join(p_boxes)}
-                    </details>
-                    """
+                    passages_html = f"""<details>
+<summary>View audit trails / cited source passages</summary>
+{"".join(p_boxes)}
+</details>"""
                     
                 st.markdown(f"""
                 <div class="rec-card">

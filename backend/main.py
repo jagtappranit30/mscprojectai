@@ -79,6 +79,9 @@ app.add_middleware(
 
 # ── Main assessment endpoint ───────────────────────────────────
 
+# Global in-memory cache for assessment runs
+assessment_cache = {}
+
 
 @app.post("/assess", response_model=AssessmentResponse)
 async def assess_productivity(
@@ -96,8 +99,28 @@ async def assess_productivity(
     """
     run_id: Optional[str] = None
     pipeline_stages: dict = {}
+    file_hash: Optional[str] = None
 
     try:
+        # Calculate combined hash of all files + parameters for caching
+        import hashlib
+        hash_obj = hashlib.sha256()
+        hash_obj.update(company_name.encode("utf-8"))
+        hash_obj.update(sector.encode("utf-8"))
+        
+        # Read files to hash them, then seek back
+        for f in files:
+            file_bytes = await f.read()
+            await f.seek(0)
+            hash_obj.update(file_bytes)
+            
+        file_hash = hash_obj.hexdigest()
+        
+        # Check cache
+        if file_hash in assessment_cache:
+            print(f"Cache hit for assessment (hash: {file_hash}) — skipping pipeline execution.")
+            return JSONResponse(status_code=200, content=assessment_cache[file_hash])
+
         # ── Create ingestion run ───────────────────────────────
         run_id = await db_service.create_ingestion_run(
             sector=sector,
@@ -113,6 +136,7 @@ async def assess_productivity(
         for f in files:
             try:
                 file_bytes = await f.read()
+                await f.seek(0)
                 parsed = parse_document(file_bytes, f.filename or "")
                 if not parsed.success:
                     raise ValueError(parsed.error_message)
@@ -230,13 +254,17 @@ async def assess_productivity(
             pipeline_stages=pipeline_stages,
         )
 
+        result_content = {
+            "status": "success",
+            "message": "Assessment completed successfully",
+            "result": output.model_dump(mode="json"),
+        }
+        if file_hash:
+            assessment_cache[file_hash] = result_content
+
         result = JSONResponse(
             status_code=200,
-            content={
-                "status": "success",
-                "message": "Assessment completed successfully",
-                "result": output.model_dump(mode="json"),
-            },
+            content=result_content,
         )
         # Free FastEmbed model from RAM after each request (Render 512 MB limit)
         rag_service.unload_fastembed()

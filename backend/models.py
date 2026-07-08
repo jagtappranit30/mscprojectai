@@ -233,3 +233,4 @@ class LLMMetricResponse(BaseModel):
     unit: str = ""
     confidence: float = Field(ge=0.0, le=1.0)
     source_quote: str = ""  # exact verbatim quote from the retrieved passage
+    page_number: Optional[str] = ""  # page number where the metric was found

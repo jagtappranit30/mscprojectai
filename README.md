@@ -238,3 +238,47 @@ is silently chosen — the user must verify manually.
 ├── requirements.lock    # Full transitive dependency tree (pip freeze)
 └── .env.example         # Required environment variables
 ```
+
+---
+
+## 🤖 Interchangeable LLM Providers (Groq & Ollama)
+
+The platform supports interchangeable LLM backends. You can switch between Groq (production) and Ollama (local development/testing) by changing environment variables.
+
+### How to use Ollama locally
+
+1. **Install Ollama**:
+   * macOS/Windows: Download from [ollama.com](https://ollama.com)
+   * Linux: Run `curl -fsSL https://ollama.com/install.sh | sh`
+
+2. **Pull the model**:
+   * Open a terminal and run:
+     ```bash
+     ollama pull qwen2.5:7b
+     ```
+
+3. **Start Ollama server**:
+   * Run:
+     ```bash
+     ollama serve
+     ```
+
+4. **Update `.env`**:
+   * Set the provider and parameters:
+     ```env
+     LLM_PROVIDER=ollama
+     OLLAMA_BASE_URL=http://localhost:11434/v1
+     OLLAMA_MODEL=qwen2.5:7b
+     ```
+
+### Switching back to Groq
+* Set in `.env`:
+  ```env
+  LLM_PROVIDER=groq
+  GROQ_API_KEY=your_actual_groq_api_key
+  ```
+
+### Troubleshooting
+* **Ollama server is not available**: Make sure you have started Ollama using `ollama serve`.
+* **Requested Ollama model not found**: Run `ollama pull qwen2.5:7b` to download the required model weight first.
+
