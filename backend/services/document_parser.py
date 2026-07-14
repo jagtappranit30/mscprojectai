@@ -350,7 +350,9 @@ def parse_pdf(file_bytes: bytes, debug: bool = False) -> ParsedDocument:
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for i, page in enumerate(pdf.pages):
-                # ── A. Table Strategy Selection ──
+                # ── A. Table Strategy Selection & Option A Heading Exclude ──
+                from collections import Counter
+                
                 table_settings = {
                     "vertical_strategy": "text",
                     "horizontal_strategy": "text",
@@ -359,9 +361,30 @@ def parse_pdf(file_bytes: bytes, debug: bool = False) -> ParsedDocument:
                     "intersection_tolerance": 3,
                 }
                 
-                # Compare default strategy vs. text-aligned strategy
-                tables_default = page.extract_tables() or []
-                tables_text = page.extract_tables(table_settings=table_settings) or []
+                # Option A: Exclude Heading Regions by Font Size
+                modal_size = 11.0
+                if page.chars:
+                    sizes = [round(c["size"], 1) for c in page.chars]
+                    if sizes:
+                        modal_size = Counter(sizes).most_common(1)[0][0]
+                
+                # Identify characters that are larger than the modal size (e.g. titles/headers)
+                large_chars = [c for c in page.chars if c["size"] >= modal_size + 1.5]
+                if large_chars:
+                    # Keep only chars that are in the top 30% of the page
+                    top_large_chars = [c for c in large_chars if c["top"] < page.height * 0.3]
+                    if top_large_chars:
+                        heading_bottom = max(c["bottom"] for c in top_large_chars)
+                        # Crop the page to only search tables below this title line
+                        table_search_page = page.within_bbox((0, heading_bottom + 1, page.width, page.height))
+                    else:
+                        table_search_page = page
+                else:
+                    table_search_page = page
+                
+                # Compare default strategy vs. text-aligned strategy on the cropped search page
+                tables_default = table_search_page.extract_tables() or []
+                tables_text = table_search_page.extract_tables(table_settings=table_settings) or []
                 
                 def count_cells(tbl_list):
                     if not tbl_list:
@@ -380,8 +403,33 @@ def parse_pdf(file_bytes: bytes, debug: bool = False) -> ParsedDocument:
                     used_strategy = "default"
                     logger.debug(f"Page {i + 1}: Using default border-based table strategy.")
                 
+                # ── Post-Extraction Table Row Validation (Option B) ──
+                cleaned_tables = []
+                headings_to_prepend = []
+                
+                def is_heading_row(row):
+                    non_empty = [str(cell).strip() for cell in row if cell is not None and str(cell).strip() != ""]
+                    if len(non_empty) == 1:
+                        # Single cell has length > 20
+                        if len(non_empty[0]) > 20:
+                            return True
+                    return False
+
+                if tables:
+                    for tbl in tables:
+                        cleaned_tbl = []
+                        for row in tbl:
+                            if is_heading_row(row):
+                                non_empty_val = next(str(cell).strip() for cell in row if cell is not None and str(cell).strip() != "")
+                                headings_to_prepend.append(non_empty_val)
+                            else:
+                                cleaned_tbl.append(row)
+                        if cleaned_tbl:
+                            cleaned_tables.append(cleaned_tbl)
+                    tables = cleaned_tables
+                
                 # ── B. Duplicate Content Filtering (filter characters inside tables) ──
-                tables_objs = page.find_tables(table_settings=table_settings if used_strategy == "text-based" else None)
+                tables_objs = table_search_page.find_tables(table_settings=table_settings if used_strategy == "text-based" else None)
                 if tables_objs:
                     def filter_chars(obj):
                         if obj.get("object_type") == "char":
@@ -400,19 +448,37 @@ def parse_pdf(file_bytes: bytes, debug: bool = False) -> ParsedDocument:
                     text_extraction_page = page
 
                 # ── C. Multi-Column Reading Order Layout ──
-                if is_multi_column(text_extraction_page):
-                    logger.info(f"Page {i + 1}: Multi-column layout detected. Splitting reading flow.")
-                    width = text_extraction_page.width
-                    height = text_extraction_page.height
-                    left_bbox = (0, 0, width * 0.5, height)
-                    right_bbox = (width * 0.5, 0, width, height)
+                # If we have a heading_bottom from Option A, split the extraction region
+                h_bottom = heading_bottom if ('heading_bottom' in locals() and heading_bottom > 0) else 0
+                
+                header_text = ""
+                if h_bottom > 0:
+                    header_text = text_extraction_page.within_bbox((0, 0, text_extraction_page.width, h_bottom)).extract_text() or ""
+                    body_page = text_extraction_page.within_bbox((0, h_bottom, text_extraction_page.width, text_extraction_page.height))
+                else:
+                    body_page = text_extraction_page
+                
+                if is_multi_column(body_page):
+                    logger.info(f"Page {i + 1}: Multi-column layout detected in body. Splitting reading flow.")
+                    width = body_page.width
+                    height = body_page.height
+                    left_bbox = (0, h_bottom, width * 0.5, height)
+                    right_bbox = (width * 0.5, h_bottom, width, height)
                     left_text = text_extraction_page.within_bbox(left_bbox).extract_text() or ""
                     right_text = text_extraction_page.within_bbox(right_bbox).extract_text() or ""
-                    page_text = left_text + "\n\n" + right_text
+                    body_text = left_text + "\n\n" + right_text
                 else:
-                    page_text = text_extraction_page.extract_text() or ""
+                    body_text = body_page.extract_text() or ""
+                
+                if header_text:
+                    page_text = header_text + "\n\n" + body_text
+                else:
+                    page_text = body_text
                 
                 page_text = _clean_financial_text(page_text)
+                if headings_to_prepend:
+                    cleaned_headings = [_clean_financial_text(h) for h in headings_to_prepend]
+                    page_text = "\n".join(cleaned_headings) + "\n\n" + page_text
 
                 # ── D. Append Markdown Formatted Tables ──
                 if tables:
