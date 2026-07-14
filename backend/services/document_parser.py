@@ -221,17 +221,61 @@ def parse_csv(file_bytes: bytes) -> ParsedDocument:
 
 
 from ..utils.logger import logger
+import re
+
+def _clean_financial_text(text: str) -> str:
+    """Cleans financial number formatting and currency symbols in raw text."""
+    if not text:
+        return ""
+    # Rejoin currency symbol with adjacent number if separated by whitespace
+    text = re.sub(r'£\s+(\d)', r'£\1', text)
+    # Normalize multiple spaces to single space
+    text = re.sub(r' {2,}', ' ', text)
+    # Preserve but flag negative numbers in parentheses format
+    text = re.sub(r'\((\d[\d,]*\.?\d*)\)', r'-\1', text)
+    return text
+
+
+def is_multi_column(page) -> bool:
+    """Detects if a page likely contains a multi-column text layout."""
+    width = page.width
+    words = page.extract_words()
+    if len(words) < 20:
+        return False
+    
+    # Check if there's a vertical gap in the middle 20% of the page
+    center_min = width * 0.4
+    center_max = width * 0.6
+    
+    words_in_center = [w for w in words if w["x0"] > center_min and w["x1"] < center_max]
+    left_words = [w for w in words if w["x1"] < center_min]
+    right_words = [w for w in words if w["x0"] > center_max]
+    
+    # If the middle section has very few words, and both columns have substantial text
+    if len(words_in_center) < len(words) * 0.05 and len(left_words) > len(words) * 0.2 and len(right_words) > len(words) * 0.2:
+        return True
+    return False
+
 
 def format_table_as_markdown(table: List[List[Optional[str]]]) -> str:
     """Converts a parsed pdfplumber table list into a clean Markdown table grid."""
     if not table or not any(table):
         return ""
     
-    # Clean cells and filter out entirely empty rows
+    # Clean cells, remove newlines, apply financial cleaning, and filter out entirely empty rows
     valid_rows = []
     for row in table:
         if row and any(cell is not None and str(cell).strip() != "" for cell in row):
-            valid_rows.append([str(cell).strip() if cell is not None else "" for cell in row])
+            cleaned_row = []
+            for cell in row:
+                if cell is None:
+                    cleaned_row.append("")
+                else:
+                    # Replace newlines with spaces to avoid breaking table layout structure,
+                    # collapse multiple spaces, and clean financial formatting.
+                    cell_clean = " ".join(str(cell).split())
+                    cleaned_row.append(_clean_financial_text(cell_clean).strip())
+            valid_rows.append(cleaned_row)
             
     if not valid_rows:
         return ""
@@ -254,11 +298,16 @@ def format_table_as_markdown(table: List[List[Optional[str]]]) -> str:
     return "\n\n" + "\n".join(markdown_rows) + "\n\n"
 
 
-def parse_pdf(file_bytes: bytes) -> ParsedDocument:
+def parse_pdf(file_bytes: bytes, debug: bool = False) -> ParsedDocument:
     """
     Parse PDF using PyMuPDF (fitz) and pdfplumber for table extraction, with max 20 pages limit,
     page markers, and scanned image detection. Converts tables to clean Markdown format.
+    Supports multi-column reading order and duplicate content removal.
     """
+    import os
+    if os.getenv("PDF_DEBUG_MODE") == "true":
+        debug = True
+
     warnings = []
     logger.info("PDF parsing started.")
 
@@ -301,8 +350,71 @@ def parse_pdf(file_bytes: bytes) -> ParsedDocument:
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for i, page in enumerate(pdf.pages):
-                page_text = page.extract_text() or ""
-                tables = page.extract_tables()
+                # ── A. Table Strategy Selection ──
+                table_settings = {
+                    "vertical_strategy": "text",
+                    "horizontal_strategy": "text",
+                    "snap_tolerance": 3,
+                    "join_tolerance": 3,
+                    "intersection_tolerance": 3,
+                }
+                
+                # Compare default strategy vs. text-aligned strategy
+                tables_default = page.extract_tables() or []
+                tables_text = page.extract_tables(table_settings=table_settings) or []
+                
+                def count_cells(tbl_list):
+                    if not tbl_list:
+                        return 0
+                    return sum(
+                        sum(1 for cell in row if cell is not None and str(cell).strip() != "")
+                        for row in tbl_list if row
+                    )
+                
+                if count_cells(tables_text) > count_cells(tables_default):
+                    tables = tables_text
+                    used_strategy = "text-based"
+                    logger.debug(f"Page {i + 1}: Using text-aligned table strategy.")
+                else:
+                    tables = tables_default
+                    used_strategy = "default"
+                    logger.debug(f"Page {i + 1}: Using default border-based table strategy.")
+                
+                # ── B. Duplicate Content Filtering (filter characters inside tables) ──
+                tables_objs = page.find_tables(table_settings=table_settings if used_strategy == "text-based" else None)
+                if tables_objs:
+                    def filter_chars(obj):
+                        if obj.get("object_type") == "char":
+                            x0 = obj.get("x0", 0)
+                            x1 = obj.get("x1", 0)
+                            top = obj.get("top", 0)
+                            bottom = obj.get("bottom", 0)
+                            for t in tables_objs:
+                                tx0, ttop, tx1, tbottom = t.bbox
+                                if (x0 >= tx0 - 2 and x1 <= tx1 + 2 and
+                                    top >= ttop - 2 and bottom <= tbottom + 2):
+                                    return False
+                        return True
+                    text_extraction_page = page.filter(filter_chars)
+                else:
+                    text_extraction_page = page
+
+                # ── C. Multi-Column Reading Order Layout ──
+                if is_multi_column(text_extraction_page):
+                    logger.info(f"Page {i + 1}: Multi-column layout detected. Splitting reading flow.")
+                    width = text_extraction_page.width
+                    height = text_extraction_page.height
+                    left_bbox = (0, 0, width * 0.5, height)
+                    right_bbox = (width * 0.5, 0, width, height)
+                    left_text = text_extraction_page.within_bbox(left_bbox).extract_text() or ""
+                    right_text = text_extraction_page.within_bbox(right_bbox).extract_text() or ""
+                    page_text = left_text + "\n\n" + right_text
+                else:
+                    page_text = text_extraction_page.extract_text() or ""
+                
+                page_text = _clean_financial_text(page_text)
+
+                # ── D. Append Markdown Formatted Tables ──
                 if tables:
                     logger.debug(f"Page {i + 1}: Found {len(tables)} tables.")
                     table_strings = []
@@ -328,10 +440,20 @@ def parse_pdf(file_bytes: bytes) -> ParsedDocument:
             # Sort blocks top-to-bottom, left-to-right
             sorted_blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
             page_text = "\n".join(b[4].strip() for b in sorted_blocks if b[4].strip())
+            page_text = _clean_financial_text(page_text)
             pages_text.append(f"--- Page {i + 1} ---\n{page_text}")
         raw_text = "\n\n".join(pages_text)
 
     doc.close()
+
+    # ── E. Optional Debug File Output ──
+    if debug:
+        try:
+            with open("/tmp/pdf_debug_raw.txt", "w") as f:
+                f.write(raw_text)
+            logger.info("Saved raw PDF extraction content to /tmp/pdf_debug_raw.txt")
+        except Exception as err:
+            logger.warning(f"Failed to write PDF debug file: {err}")
 
     # Scanned PDF check: calculate character count without page headers/markers
     clean_text = raw_text

@@ -74,3 +74,48 @@ async def test_extraction_repair_loop_success():
             # Verify it was successfully repaired and doesn't contain validation errors
             assert len(errors) == 0
             assert metrics.revenue == 1000
+
+
+def test_clean_financial_text():
+    from backend.services.document_parser import _clean_financial_text
+    
+    # Test currency rejoining
+    assert _clean_financial_text("revenue £ 2,500,000") == "revenue £2,500,000"
+    
+    # Test whitespace collapse
+    assert _clean_financial_text("gross   margin   40%") == "gross margin 40%"
+    
+    # Test negative parentheses conversion
+    assert _clean_financial_text("net loss (45,000)") == "net loss -45,000"
+    assert _clean_financial_text("loss (123.45)") == "loss -123.45"
+
+
+def test_is_multi_column():
+    from backend.services.document_parser import is_multi_column
+    
+    # Mock a page object with 2 columns of words
+    page = MagicMock()
+    page.width = 600
+    
+    # Create words for left column (x-coordinates < 240)
+    left_words = [
+        {"x0": 10, "x1": 50, "text": "left"},
+        {"x0": 20, "x1": 80, "text": "column"},
+        {"x0": 15, "x1": 90, "text": "text"},
+        {"x0": 10, "x1": 70, "text": "here"},
+        {"x0": 20, "x1": 80, "text": "content"},
+    ]
+    # Create words for right column (x-coordinates > 360)
+    right_words = [
+        {"x0": 370, "x1": 410, "text": "right"},
+        {"x0": 380, "x1": 440, "text": "column"},
+        {"x0": 375, "x1": 450, "text": "text"},
+        {"x0": 370, "x1": 430, "text": "here"},
+        {"x0": 380, "x1": 440, "text": "content"},
+    ]
+    
+    # Combined words list
+    page.extract_words.return_value = left_words * 4 + right_words * 4
+    
+    assert is_multi_column(page) is True
+

@@ -827,6 +827,24 @@ def inject_custom_css() -> None:
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
+    
+    /* Consistent table styling */
+    .stDataFrame { border: 1px solid #262B38 !important; border-radius: 8px !important; }
+    .stDataFrame table { font-size: 14px !important; }
+    .stDataFrame th { background-color: #1C212E !important; font-weight: 600 !important; 
+                       text-align: left !important; padding: 12px !important; }
+    .stDataFrame td { padding: 10px 12px !important; }
+    
+    /* Card containers for score sections */
+    div[data-testid="stMetric"] {
+        background-color: #151923 !important;
+        border: 1px solid #262B38 !important;
+        border-radius: 8px !important;
+        padding: 16px !important;
+    }
+    
+    /* Remove default Streamlit padding awkwardness */
+    .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
     """
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
     st.markdown('<div class="vantly-bg"></div>', unsafe_allow_html=True)
@@ -914,68 +932,72 @@ def _render_benchmark_slider(score: float, p25: float = 25, p50: float = 50, p75
     </div>
     """
 
-def _render_metrics_table(metrics_list: List[Dict[str, Any]]) -> str:
-    import textwrap
-    rows = []
+def _display_metrics_dataframe(metrics_list: List[Dict[str, Any]], metric_names: List[str], title: str, value_type: str) -> None:
+    import pandas as pd
+    
+    # Filter only the metrics in metric_names
+    filtered_metrics = [m for m in metrics_list if m.get("metric_name") in metric_names]
+    if not filtered_metrics:
+        return
+        
     pretty_names = {
         "revenue_per_employee": "Revenue per Employee",
         "output_per_payroll": "Output per Payroll",
-        "headcount_efficiency_ratio": "Headcount Efficiency Ratio",
+        "headcount_efficiency_ratio": "Headcount Efficiency",
         "gross_margin": "Gross Margin",
         "operating_margin": "Operating Margin",
         "current_ratio": "Current Ratio",
         "quick_ratio": "Quick Ratio"
     }
     
-    for m in metrics_list:
+    data = []
+    for m in filtered_metrics:
         name = pretty_names.get(m.get("metric_name"), m.get("metric_name"))
-        
         if m.get("excluded", False):
-            val_str = '<span style="color:#5C6478;">Excluded</span>'
-            p50_str = "-"
-            score_str = '<span style="color:#5C6478;">-</span>'
-        else:
-            raw_val = m.get("raw_value")
-            if "margin" in m.get("metric_name", "").lower():
-                val_str = f"{raw_val:.1f}%" if raw_val is not None else "-"
-            elif "ratio" in m.get("metric_name", "").lower():
-                val_str = f"{raw_val:.2f}" if raw_val is not None else "-"
-            else:
-                val_str = f"£{raw_val:,.0f}" if raw_val is not None else "-"
-                
-            p50 = m.get("p50", 50.0)
-            if "margin" in m.get("metric_name", "").lower():
-                p50_str = f"{p50:.1f}%"
-            elif "ratio" in m.get("metric_name", "").lower():
-                p50_str = f"{p50:.2f}"
-            else:
-                p50_str = f"£{p50:,.0f}"
-                
-            norm = m.get("normalised_score", 0.0)
-            score_str = f"{norm:.1f}"
-            
-        rows.append(textwrap.dedent(f"""\
-        <tr>
-          <td>{name}</td>
-          <td class="metric-value" style="text-align: right;">{val_str}</td>
-          <td style="text-align: right; color: #5C6478;">{p50_str}</td>
-          <td style="text-align: right; font-weight: 600; color: #F5F6FA;">{score_str}</td>
-        </tr>"""))
+            continue
+        raw_val = m.get("raw_value")
+        p25 = m.get("p25")
+        p50 = m.get("p50")
+        p75 = m.get("p75")
+        score_val = m.get("normalised_score", 0.0)
+        data.append({
+            "Metric": name,
+            "Your Score": raw_val,
+            "Sector P25": p25,
+            "Sector P50": p50,
+            "Sector P75": p75,
+            "Score": score_val
+        })
         
-    return textwrap.dedent(f"""\
-    <table class="metrics-table">
-      <thead>
-        <tr>
-          <th>Metric</th>
-          <th style="text-align: right;">Value</th>
-          <th style="text-align: right;">p50 Benchmark</th>
-          <th style="text-align: right;">Score</th>
-        </tr>
-      </thead>
-      <tbody>
-        {"".join(rows)}
-      </tbody>
-    </table>""")
+    if not data:
+        return
+        
+    df = pd.DataFrame(data)
+    
+    # Configure columns based on value_type
+    if value_type == "currency":
+        val_config = st.column_config.NumberColumn(format="£%,.0f")
+    elif value_type == "percent":
+        val_config = st.column_config.NumberColumn(format="%.1f%%")
+    elif value_type == "ratio":
+        val_config = st.column_config.NumberColumn(format="%.2f")
+    else:
+        val_config = st.column_config.NumberColumn(format="%.1f")
+        
+    st.markdown(f"<span style='font-size: 13px; font-weight: 600; color: #9AA3B5; display: block; margin: 16px 0 6px 0;'>{title}</span>", unsafe_allow_html=True)
+    st.dataframe(
+        df,
+        column_config={
+            "Your Score": val_config,
+            "Sector P25": val_config,
+            "Sector P50": val_config,
+            "Sector P75": val_config,
+            "Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
+        },
+        use_container_width=True,
+        hide_index=True,
+    )
+
 
 def _render_pillar_dashboard(pillar: Dict[str, Any], title: str, icon_svg: str) -> None:
     score = pillar.get("score", 0.0)
@@ -1001,7 +1023,12 @@ def _render_pillar_dashboard(pillar: Dict[str, Any], title: str, icon_svg: str) 
     
     # Detailed metric breakdown list/table
     if metrics:
-        st.markdown(_render_metrics_table(metrics), unsafe_allow_html=True)
+        if title == "Labour Efficiency":
+            _display_metrics_dataframe(metrics, ["revenue_per_employee", "headcount_efficiency_ratio"], "Financial Metrics", "currency")
+            _display_metrics_dataframe(metrics, ["output_per_payroll"], "Efficiency Ratios", "ratio")
+        elif title == "Financial Health":
+            _display_metrics_dataframe(metrics, ["gross_margin", "operating_margin"], "Margin Metrics", "percent")
+            _display_metrics_dataframe(metrics, ["current_ratio", "quick_ratio"], "Liquidity Ratios", "ratio")
         
     # Show exclusions inline inside card
     if excluded:
@@ -1343,7 +1370,7 @@ def render_results_page() -> None:
         labour = res.get("labour_efficiency", {})
         financial = res.get("financial_health", {})
         
-        col_lab, col_fin = st.columns(2)
+        col_lab, col_fin = st.columns([1, 1], gap="large")
         with col_lab:
             with st.container(border=True):
                 st.markdown('<div class="pillar-card"></div>', unsafe_allow_html=True)
