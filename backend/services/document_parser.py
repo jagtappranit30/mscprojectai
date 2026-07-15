@@ -236,6 +236,34 @@ def _clean_financial_text(text: str) -> str:
     return text
 
 
+def extract_text_in_reading_order(page) -> str:
+    """Extracts text from a pdfplumber Page, sorting words to ensure visual reading order."""
+    words = page.extract_words()
+    if not words:
+        return ""
+    
+    # Sort primarily by top coordinate, secondarily by left x-coordinate
+    sorted_words = sorted(words, key=lambda w: (w["top"], w["x0"]))
+    
+    lines = []
+    current_line = []
+    for w in sorted_words:
+        if not current_line:
+            current_line.append(w)
+        else:
+            prev_w = current_line[-1]
+            # Group words that fall on the same horizontal band (y-tolerance of 3 points)
+            if abs(w["top"] - prev_w["top"]) <= 3:
+                current_line.append(w)
+            else:
+                lines.append(sorted(current_line, key=lambda x: x["x0"]))
+                current_line = [w]
+    if current_line:
+        lines.append(sorted(current_line, key=lambda x: x["x0"]))
+        
+    return "\n".join(" ".join(w["text"] for w in line) for line in lines)
+
+
 def is_multi_column(page) -> bool:
     """Detects if a page likely contains a multi-column text layout."""
     width = page.width
@@ -453,7 +481,7 @@ def parse_pdf(file_bytes: bytes, debug: bool = False) -> ParsedDocument:
                 
                 header_text = ""
                 if h_bottom > 0:
-                    header_text = text_extraction_page.within_bbox((0, 0, text_extraction_page.width, h_bottom)).extract_text() or ""
+                    header_text = extract_text_in_reading_order(text_extraction_page.within_bbox((0, 0, text_extraction_page.width, h_bottom)))
                     body_page = text_extraction_page.within_bbox((0, h_bottom, text_extraction_page.width, text_extraction_page.height))
                 else:
                     body_page = text_extraction_page
@@ -464,11 +492,11 @@ def parse_pdf(file_bytes: bytes, debug: bool = False) -> ParsedDocument:
                     height = body_page.height
                     left_bbox = (0, h_bottom, width * 0.5, height)
                     right_bbox = (width * 0.5, h_bottom, width, height)
-                    left_text = text_extraction_page.within_bbox(left_bbox).extract_text() or ""
-                    right_text = text_extraction_page.within_bbox(right_bbox).extract_text() or ""
+                    left_text = extract_text_in_reading_order(text_extraction_page.within_bbox(left_bbox))
+                    right_text = extract_text_in_reading_order(text_extraction_page.within_bbox(right_bbox))
                     body_text = left_text + "\n\n" + right_text
                 else:
-                    body_text = body_page.extract_text() or ""
+                    body_text = extract_text_in_reading_order(body_page)
                 
                 if header_text:
                     page_text = header_text + "\n\n" + body_text

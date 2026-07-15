@@ -119,3 +119,26 @@ def test_is_multi_column():
     
     assert is_multi_column(page) is True
 
+
+def test_extract_text_in_reading_order():
+    from backend.services.document_parser import extract_text_in_reading_order
+    
+    # Mock page with scrambled drawing order words
+    page = MagicMock()
+    # Scrambled drawing stream order:
+    # 2nd line first, then 1st line, with scrambled words in 1st line
+    page.extract_words.return_value = [
+        {"top": 50, "x0": 200, "text": "line"},
+        {"top": 10, "x0": 150, "text": "is"},
+        {"top": 10, "x0": 200, "text": "first"},
+        {"top": 50, "x0": 100, "text": "second"},
+        {"top": 10, "x0": 100, "text": "this"},
+    ]
+    
+    extracted = extract_text_in_reading_order(page)
+    # Expected visual order:
+    # Line 1: this is first
+    # Line 2: second line
+    assert extracted == "this is first\nsecond line"
+
+
